@@ -81,12 +81,12 @@ buildable or documentable, tested where applicable, committed, and pushed.
 
 ## Slice 9: Manifest and Compare Planning
 
-- [ ] Implement versioned manifest data structures.
-- [ ] Add `manifest` command for JSON and TSV inventories.
-- [ ] Add `compare` command for manifest-to-manifest and folder-to-folder
+- [x] Implement versioned manifest data structures.
+- [x] Add `manifest` command for JSON and TSV inventories.
+- [x] Add `compare` command for manifest-to-manifest and folder-to-folder
   comparisons.
-- [ ] Define exit codes for automation use.
-- [ ] Document manifest schema versioning.
+- [x] Define exit codes for automation use.
+- [x] Document manifest schema versioning.
 
 ## Slice 10: Subdivision Planning
 

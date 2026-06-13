@@ -3,9 +3,9 @@ Command Plan
 
 The command-line interface is implemented in Rust using ``clap``. ``find``, the
 filesystem-backed part of ``fileinfo``, fast ``verify`` extension/signature
-checks, and filesystem-backed ``folderinfo`` are implemented. Other command
-behavior provides parser and help coverage until its development slices are
-completed.
+checks, filesystem-backed ``folderinfo``, versioned ``manifest`` output, and
+basic ``compare`` are implemented. Other command behavior provides parser and
+help coverage until its development slices are completed.
 
 Preview help:
 
@@ -190,11 +190,37 @@ Example TSV output:
 Write stable JSON or TSV inventories for downstream tools, workflow engines, or
 LIMS-style systems.
 
-Preview:
+Usage:
 
 .. code-block:: sh
 
+   cargo run -- manifest /path/to/folder
    cargo run -- manifest /path/to/folder --format json
+   cargo run -- manifest /path/to/folder --format json --output manifest.json
+
+Current behavior accepts a POD5 file or a folder tree. It writes schema version
+``1`` inventories with one row per POD5 file.
+
+Schema version 1 fields:
+
+* ``schema_version``;
+* source path;
+* relative path;
+* file path;
+* size in bytes;
+* fast verification status;
+* number of failed implemented verification checks.
+
+TSV is emitted by default. JSON is available with ``--format json``. When
+``--output`` is provided, the rendered manifest is written to that file and the
+command prints the output path.
+
+Example TSV output:
+
+.. code-block:: text
+
+   schema_version	source	relative_path	path	size_bytes	verification_status	verification_failed_checks
+   1	/data/run/pod5	reads.pod5	/data/run/pod5/reads.pod5	1048576	incomplete	0
 
 ``compare``
 -----------
@@ -202,11 +228,36 @@ Preview:
 Compare two POD5 collections or manifests and report missing files, added files,
 duplicates, metadata drift, and integrity changes.
 
-Preview:
+Usage:
 
 .. code-block:: sh
 
    cargo run -- compare /path/to/left /path/to/right
+   cargo run -- compare left-manifest.json right-manifest.json --format json
+
+Current behavior compares two folders, two manifest JSON files, or one of each.
+The comparison key is manifest-relative path. Differences include files missing
+from either side and entries with changed size or fast verification status.
+
+Output statuses:
+
+* ``match`` means no manifest-level differences were found;
+* ``different`` means one or more missing or changed entries were found.
+
+Automation exit-code convention:
+
+* current CLI execution exits non-zero for command/runtime errors;
+* comparison differences are represented in output as ``different`` for this
+  slice;
+* a later CLI layer should map ``different`` to a dedicated non-zero exit code
+  when the command runner can return structured process statuses.
+
+Example TSV output:
+
+.. code-block:: text
+
+   status	kind	relative_path	left_size_bytes	right_size_bytes	left_verification_status	right_verification_status
+   different	missing_from_right	reads-a.pod5				
 
 ``subdivide``
 -------------

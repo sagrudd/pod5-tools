@@ -14,7 +14,7 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Command-line parser for the `pod5-tools` binary.
 #[derive(Debug, Parser)]
@@ -77,7 +77,7 @@ pub enum Command {
         #[arg(long)]
         output: Option<PathBuf>,
         /// Output format.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        #[arg(long, value_enum, default_value_t = OutputFormat::Tsv)]
         format: OutputFormat,
     },
     /// Plan temporal or structural POD5 subdivisions.
@@ -91,11 +91,14 @@ pub enum Command {
         left: PathBuf,
         /// Right-hand collection or manifest.
         right: PathBuf,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Tsv)]
+        format: OutputFormat,
     },
 }
 
 /// Machine-readable command output formats.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     /// Tab-separated values for shell and workflow integration.
@@ -105,7 +108,7 @@ pub enum OutputFormat {
 }
 
 /// Metadata for one directory that contains POD5 files.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Pod5DirectoryRecord {
     /// Directory containing one or more `.pod5` files.
     pub path: PathBuf,
@@ -120,7 +123,7 @@ pub struct Pod5DirectoryRecord {
 }
 
 /// File-level POD5 metadata and integrity status.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pod5FileInfo {
     /// POD5 file path.
     pub path: PathBuf,
@@ -143,7 +146,7 @@ pub struct Pod5FileInfo {
 }
 
 /// Folder-level summary across multiple POD5 files.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pod5FolderInfo {
     /// Folder or run tree that was inspected.
     pub path: PathBuf,
@@ -174,7 +177,7 @@ pub struct Pod5FolderInfo {
 }
 
 /// Overall status from `pod5-tools verify`.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerifyStatus {
     /// All implemented checks passed, but some specification checks are not implemented yet.
@@ -186,7 +189,7 @@ pub enum VerifyStatus {
 }
 
 /// Status for an individual verification check.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerifyCheckStatus {
     /// The check passed.
@@ -198,7 +201,7 @@ pub enum VerifyCheckStatus {
 }
 
 /// One verification check result.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct VerifyCheck {
     /// Stable check identifier for machine-readable output.
     pub name: String,
@@ -211,7 +214,7 @@ pub struct VerifyCheck {
 }
 
 /// Verification report for one candidate POD5 file.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Pod5VerifyReport {
     /// Candidate file path.
     pub path: PathBuf,
@@ -223,8 +226,75 @@ pub struct Pod5VerifyReport {
     pub checks: Vec<VerifyCheck>,
 }
 
+/// Current manifest schema version.
+pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
+
+/// Versioned manifest for a POD5 collection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Pod5Manifest {
+    /// Manifest schema version.
+    pub schema_version: u32,
+    /// Source path used to create the manifest.
+    pub source: PathBuf,
+    /// Manifest entries, sorted by relative path.
+    pub entries: Vec<Pod5ManifestEntry>,
+}
+
+/// One POD5 file inventory entry.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Pod5ManifestEntry {
+    /// Path relative to the manifest source when possible.
+    pub relative_path: PathBuf,
+    /// Absolute or invocation-resolved file path.
+    pub path: PathBuf,
+    /// File size in bytes.
+    pub size_bytes: u64,
+    /// Fast verification status for the file.
+    pub verification_status: VerifyStatus,
+    /// Number of implemented verification checks that failed.
+    pub verification_failed_checks: u64,
+}
+
+/// Overall comparison status for automation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompareStatus {
+    /// Inputs have no manifest-level differences.
+    Match,
+    /// Inputs differ.
+    Different,
+}
+
+/// Manifest or folder comparison report.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Pod5CompareReport {
+    /// Overall comparison status.
+    pub status: CompareStatus,
+    /// Entries present only in the left input.
+    pub missing_from_right: Vec<PathBuf>,
+    /// Entries present only in the right input.
+    pub missing_from_left: Vec<PathBuf>,
+    /// Entries present on both sides but with different inventory fields.
+    pub changed: Vec<Pod5CompareChange>,
+}
+
+/// One changed POD5 manifest entry.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Pod5CompareChange {
+    /// Relative path shared by both compared inputs.
+    pub relative_path: PathBuf,
+    /// Left file size in bytes.
+    pub left_size_bytes: u64,
+    /// Right file size in bytes.
+    pub right_size_bytes: u64,
+    /// Left verification status.
+    pub left_verification_status: VerifyStatus,
+    /// Right verification status.
+    pub right_verification_status: VerifyStatus,
+}
+
 /// Integrity state for a POD5 file or collection.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum IntegrityStatus {
     /// The file or collection was checked and no integrity problem was found.
     Passed,
@@ -431,9 +501,17 @@ pub fn run(cli: Cli) -> Result<String, Pod5ToolsError> {
         Command::Verify { path, format } => return run_verify(&path, format),
         Command::Folderinfo { path, format } => return run_folderinfo(&path, format),
         Command::Playback { .. } => "playback",
-        Command::Manifest { .. } => "manifest",
+        Command::Manifest {
+            path,
+            output,
+            format,
+        } => return run_manifest(&path, output.as_deref(), format),
         Command::Subdivide { .. } => "subdivide",
-        Command::Compare { .. } => "compare",
+        Command::Compare {
+            left,
+            right,
+            format,
+        } => return run_compare(&left, &right, format),
     };
     Ok(format!(
         "pod5-tools {command} is not implemented yet; see todo.md for the development plan"
@@ -564,6 +642,36 @@ fn run_folderinfo(path: &Path, format: OutputFormat) -> Result<String, Pod5Tools
     match format {
         OutputFormat::Tsv => Ok(format_folder_info_tsv(&info)),
         OutputFormat::Json => serde_json::to_string_pretty(&info)
+            .map_err(|error| Pod5ToolsError::new(format!("failed to serialize JSON: {error}"))),
+    }
+}
+
+fn run_manifest(
+    path: &Path,
+    output: Option<&Path>,
+    format: OutputFormat,
+) -> Result<String, Pod5ToolsError> {
+    let manifest = manifest_from_path(path)?;
+    let rendered = match format {
+        OutputFormat::Tsv => format_manifest_tsv(&manifest),
+        OutputFormat::Json => serde_json::to_string_pretty(&manifest)
+            .map_err(|error| Pod5ToolsError::new(format!("failed to serialize JSON: {error}")))?,
+    };
+    if let Some(output) = output {
+        fs::write(output, rendered).map_err(|error| {
+            Pod5ToolsError::new(format!("failed to write {}: {error}", output.display()))
+        })?;
+        Ok(format!("wrote manifest to {}", output.display()))
+    } else {
+        Ok(rendered)
+    }
+}
+
+fn run_compare(left: &Path, right: &Path, format: OutputFormat) -> Result<String, Pod5ToolsError> {
+    let report = compare_inputs(left, right)?;
+    match format {
+        OutputFormat::Tsv => Ok(format_compare_report_tsv(&report)),
+        OutputFormat::Json => serde_json::to_string_pretty(&report)
             .map_err(|error| Pod5ToolsError::new(format!("failed to serialize JSON: {error}"))),
     }
 }
@@ -870,6 +978,156 @@ fn collect_pod5_files(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), 
     Ok(())
 }
 
+/// Build a versioned POD5 manifest from one file or a folder tree.
+pub fn manifest_from_path(path: &Path) -> Result<Pod5Manifest, Pod5ToolsError> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        Pod5ToolsError::new(format!("failed to inspect {}: {error}", path.display()))
+    })?;
+    let mut files = Vec::new();
+    if metadata.is_dir() {
+        collect_pod5_files(path, &mut files)?;
+    } else if metadata.is_file() && is_pod5_path(path) {
+        files.push(path.to_path_buf());
+    } else if metadata.is_file() {
+        return Err(Pod5ToolsError::new(format!(
+            "manifest expects a .pod5 file or directory: {}",
+            path.display()
+        )));
+    } else {
+        return Err(Pod5ToolsError::new(format!(
+            "manifest expects a file or directory: {}",
+            path.display()
+        )));
+    }
+    files.sort();
+
+    let mut entries = Vec::new();
+    for file in files {
+        let report = verify_pod5_file(&file)?;
+        let relative_path = manifest_relative_path(path, &file);
+        let verification_failed_checks = report
+            .checks
+            .iter()
+            .filter(|check| check.status == VerifyCheckStatus::Failed)
+            .count() as u64;
+        entries.push(Pod5ManifestEntry {
+            relative_path,
+            path: file,
+            size_bytes: report.size_bytes,
+            verification_status: report.status,
+            verification_failed_checks,
+        });
+    }
+    entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+
+    Ok(Pod5Manifest {
+        schema_version: MANIFEST_SCHEMA_VERSION,
+        source: path.to_path_buf(),
+        entries,
+    })
+}
+
+fn manifest_relative_path(root: &Path, file: &Path) -> PathBuf {
+    if root.is_dir() {
+        file.strip_prefix(root).unwrap_or(file).to_path_buf()
+    } else {
+        file.file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| file.to_path_buf())
+    }
+}
+
+/// Load a manifest JSON file or build a manifest from a POD5 file/folder.
+pub fn manifest_input(path: &Path) -> Result<Pod5Manifest, Pod5ToolsError> {
+    if path.is_file()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+    {
+        let content = fs::read_to_string(path).map_err(|error| {
+            Pod5ToolsError::new(format!("failed to read {}: {error}", path.display()))
+        })?;
+        let manifest: Pod5Manifest = serde_json::from_str(&content).map_err(|error| {
+            Pod5ToolsError::new(format!(
+                "failed to parse manifest {}: {error}",
+                path.display()
+            ))
+        })?;
+        if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
+            return Err(Pod5ToolsError::new(format!(
+                "unsupported manifest schema version {} in {}",
+                manifest.schema_version,
+                path.display()
+            )));
+        }
+        Ok(manifest)
+    } else {
+        manifest_from_path(path)
+    }
+}
+
+/// Compare two POD5 manifests or inputs that can be converted to manifests.
+pub fn compare_inputs(left: &Path, right: &Path) -> Result<Pod5CompareReport, Pod5ToolsError> {
+    compare_manifests(&manifest_input(left)?, &manifest_input(right)?)
+}
+
+/// Compare two POD5 manifests.
+pub fn compare_manifests(
+    left: &Pod5Manifest,
+    right: &Pod5Manifest,
+) -> Result<Pod5CompareReport, Pod5ToolsError> {
+    let left_entries = left
+        .entries
+        .iter()
+        .map(|entry| (entry.relative_path.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let right_entries = right
+        .entries
+        .iter()
+        .map(|entry| (entry.relative_path.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+
+    let missing_from_right = left_entries
+        .keys()
+        .filter(|path| !right_entries.contains_key(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let missing_from_left = right_entries
+        .keys()
+        .filter(|path| !left_entries.contains_key(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut changed = Vec::new();
+    for (relative_path, left_entry) in &left_entries {
+        if let Some(right_entry) = right_entries.get(relative_path)
+            && (left_entry.size_bytes != right_entry.size_bytes
+                || left_entry.verification_status != right_entry.verification_status)
+        {
+            changed.push(Pod5CompareChange {
+                relative_path: relative_path.clone(),
+                left_size_bytes: left_entry.size_bytes,
+                right_size_bytes: right_entry.size_bytes,
+                left_verification_status: left_entry.verification_status.clone(),
+                right_verification_status: right_entry.verification_status.clone(),
+            });
+        }
+    }
+
+    let status =
+        if missing_from_right.is_empty() && missing_from_left.is_empty() && changed.is_empty() {
+            CompareStatus::Match
+        } else {
+            CompareStatus::Different
+        };
+    Ok(Pod5CompareReport {
+        status,
+        missing_from_right,
+        missing_from_left,
+        changed,
+    })
+}
+
 /// Format POD5 directory records as tab-separated text.
 pub fn format_directory_records_tsv(records: &[Pod5DirectoryRecord]) -> String {
     let mut output = String::from(
@@ -980,6 +1238,74 @@ pub fn format_folder_info_tsv(info: &Pod5FolderInfo) -> String {
     )
 }
 
+/// Format a POD5 manifest as tab-separated text.
+pub fn format_manifest_tsv(manifest: &Pod5Manifest) -> String {
+    let mut output = String::from(
+        "schema_version\tsource\trelative_path\tpath\tsize_bytes\tverification_status\tverification_failed_checks",
+    );
+    for entry in &manifest.entries {
+        output.push('\n');
+        output.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            manifest.schema_version,
+            manifest.source.display(),
+            entry.relative_path.display(),
+            entry.path.display(),
+            entry.size_bytes,
+            verify_status_label(&entry.verification_status),
+            entry.verification_failed_checks,
+        ));
+    }
+    output
+}
+
+/// Format a POD5 comparison report as tab-separated text.
+pub fn format_compare_report_tsv(report: &Pod5CompareReport) -> String {
+    let mut output = String::from(
+        "status\tkind\trelative_path\tleft_size_bytes\tright_size_bytes\tleft_verification_status\tright_verification_status",
+    );
+    for path in &report.missing_from_right {
+        output.push('\n');
+        output.push_str(&format!(
+            "{}\tmissing_from_right\t{}\t\t\t\t",
+            compare_status_label(&report.status),
+            path.display(),
+        ));
+    }
+    for path in &report.missing_from_left {
+        output.push('\n');
+        output.push_str(&format!(
+            "{}\tmissing_from_left\t{}\t\t\t\t",
+            compare_status_label(&report.status),
+            path.display(),
+        ));
+    }
+    for change in &report.changed {
+        output.push('\n');
+        output.push_str(&format!(
+            "{}\tchanged\t{}\t{}\t{}\t{}\t{}",
+            compare_status_label(&report.status),
+            change.relative_path.display(),
+            change.left_size_bytes,
+            change.right_size_bytes,
+            verify_status_label(&change.left_verification_status),
+            verify_status_label(&change.right_verification_status),
+        ));
+    }
+    if report.status == CompareStatus::Match {
+        output.push('\n');
+        output.push_str("match\tmatch\t\t\t\t\t");
+    }
+    output
+}
+
+fn compare_status_label(status: &CompareStatus) -> &'static str {
+    match status {
+        CompareStatus::Match => "match",
+        CompareStatus::Different => "different",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1068,9 +1394,9 @@ mod tests {
 
     #[test]
     fn run_returns_stub_message_for_parsed_command() {
-        let cli = Cli::try_parse_from(["pod5-tools", "manifest", "/data"]).unwrap();
+        let cli = Cli::try_parse_from(["pod5-tools", "subdivide", "/data"]).unwrap();
         let message = run(cli).unwrap();
-        assert!(message.contains("manifest"));
+        assert!(message.contains("subdivide"));
         assert!(message.contains("not implemented yet"));
     }
 
@@ -1398,6 +1724,140 @@ mod tests {
 
         assert!(output.contains("\"pod5_file_count\": 1"));
         assert!(output.contains("\"verification_failed_count\": 0"));
+    }
+
+    #[test]
+    fn manifest_from_folder_records_relative_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        write_signature_fixture(&root.path().join("reads-a.pod5"));
+        write_signature_fixture(&nested.join("reads-b.pod5"));
+
+        let manifest = manifest_from_path(root.path()).unwrap();
+
+        assert_eq!(manifest.schema_version, MANIFEST_SCHEMA_VERSION);
+        assert_eq!(manifest.entries.len(), 2);
+        assert_eq!(
+            manifest.entries[0].relative_path,
+            PathBuf::from("nested/reads-b.pod5")
+        );
+        assert_eq!(manifest.entries[0].size_bytes, 32);
+        assert_eq!(
+            manifest.entries[0].verification_status,
+            VerifyStatus::Incomplete
+        );
+    }
+
+    #[test]
+    fn run_manifest_emits_tsv_by_default() {
+        let root = tempfile::tempdir().unwrap();
+        write_signature_fixture(&root.path().join("reads.pod5"));
+
+        let cli =
+            Cli::try_parse_from(["pod5-tools", "manifest", root.path().to_str().unwrap()]).unwrap();
+        let output = run(cli).unwrap();
+
+        assert!(output.starts_with("schema_version\tsource\trelative_path"));
+        assert!(output.contains("\treads.pod5\t"));
+        assert!(output.contains("\tincomplete\t0"));
+    }
+
+    #[test]
+    fn run_manifest_writes_json_output_file() {
+        let root = tempfile::tempdir().unwrap();
+        write_signature_fixture(&root.path().join("reads.pod5"));
+        let output_path = root.path().join("manifest.json");
+
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "manifest",
+            root.path().to_str().unwrap(),
+            "--format",
+            "json",
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .unwrap();
+        let message = run(cli).unwrap();
+        let loaded = manifest_input(&output_path).unwrap();
+
+        assert!(message.contains("wrote manifest"));
+        assert_eq!(loaded.entries.len(), 1);
+    }
+
+    #[test]
+    fn compare_folders_reports_missing_and_changed_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let left = root.path().join("left");
+        let right = root.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        write_signature_fixture(&left.join("same.pod5"));
+        write_signature_fixture(&right.join("same.pod5"));
+        write_signature_fixture(&left.join("left-only.pod5"));
+        write_signature_fixture(&right.join("right-only.pod5"));
+        fs::write(right.join("changed.pod5"), b"not-pod5-but-long-enough").unwrap();
+        write_signature_fixture(&left.join("changed.pod5"));
+
+        let report = compare_inputs(&left, &right).unwrap();
+
+        assert_eq!(report.status, CompareStatus::Different);
+        assert_eq!(
+            report.missing_from_right,
+            vec![PathBuf::from("left-only.pod5")]
+        );
+        assert_eq!(
+            report.missing_from_left,
+            vec![PathBuf::from("right-only.pod5")]
+        );
+        assert_eq!(report.changed.len(), 1);
+        assert_eq!(
+            report.changed[0].relative_path,
+            PathBuf::from("changed.pod5")
+        );
+    }
+
+    #[test]
+    fn compare_manifest_files_reports_match() {
+        let root = tempfile::tempdir().unwrap();
+        write_signature_fixture(&root.path().join("reads.pod5"));
+        let manifest = manifest_from_path(root.path()).unwrap();
+        let left = root.path().join("left.json");
+        let right = root.path().join("right.json");
+        let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
+        fs::write(&left, &manifest_json).unwrap();
+        fs::write(&right, &manifest_json).unwrap();
+
+        let report = compare_inputs(&left, &right).unwrap();
+        let output = format_compare_report_tsv(&report);
+
+        assert_eq!(report.status, CompareStatus::Match);
+        assert!(output.contains("match\tmatch"));
+    }
+
+    #[test]
+    fn run_compare_emits_json_when_requested() {
+        let root = tempfile::tempdir().unwrap();
+        let left = root.path().join("left");
+        let right = root.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        write_signature_fixture(&left.join("reads.pod5"));
+
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "compare",
+            left.to_str().unwrap(),
+            right.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        let output = run(cli).unwrap();
+
+        assert!(output.contains("\"status\": \"different\""));
+        assert!(output.contains("missing_from_right"));
     }
 
     #[derive(Debug)]

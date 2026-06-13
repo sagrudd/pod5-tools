@@ -106,11 +106,11 @@ buildable or documentable, tested where applicable, committed, and pushed.
 
 ## Slice 12: Write-Capable Subdivision
 
-- [ ] Implement source-preserving output writing for selected subdivision modes.
-- [ ] Verify generated POD5 output integrity.
-- [ ] Record provenance in sidecar manifests.
-- [ ] Add tests or documented fixture generation steps.
-- [ ] Document storage and performance caveats.
+- [x] Implement source-preserving output writing for selected subdivision modes.
+- [x] Verify generated POD5 output integrity.
+- [x] Record provenance in sidecar manifests.
+- [x] Add tests or documented fixture generation steps.
+- [x] Document storage and performance caveats.
 
 ## Slice 13: Release Preparation
 

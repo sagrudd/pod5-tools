@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
@@ -158,6 +158,29 @@ pub enum SubdivideCommand {
         /// Optional output path. Standard output is used when omitted.
         #[arg(long)]
         output: Option<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Tsv)]
+        format: OutputFormat,
+    },
+    /// Copy planned whole-POD5 subdivisions into an output directory.
+    Write {
+        /// Source POD5 file, folder, or manifest.
+        path: PathBuf,
+        /// Output directory that will receive chunk folders and provenance.
+        #[arg(long)]
+        out: PathBuf,
+        /// Planning strategy.
+        #[arg(long, value_enum, default_value_t = SubdivideStrategy::FileCount)]
+        strategy: SubdivideStrategy,
+        /// Maximum files per chunk for file-count planning.
+        #[arg(long, default_value_t = 1)]
+        files_per_chunk: u64,
+        /// Target elapsed seconds per chunk for elapsed-time planning.
+        #[arg(long)]
+        seconds_per_chunk: Option<u64>,
+        /// Target reads per chunk for read-count planning.
+        #[arg(long)]
+        reads_per_chunk: Option<u64>,
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Tsv)]
         format: OutputFormat,
@@ -409,6 +432,68 @@ pub struct Pod5SubdivideChunk {
     pub total_bytes: u64,
     /// Read count assigned to the chunk when available.
     pub read_count: Option<u64>,
+}
+
+/// Report for a materialized whole-file subdivision write.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Pod5SubdivideWriteReport {
+    /// Source path used to build the subdivision plan.
+    pub source: PathBuf,
+    /// Output directory that received chunk folders.
+    pub output_dir: PathBuf,
+    /// Planning strategy used for the write.
+    pub strategy: SubdivideStrategy,
+    /// Number of chunks written.
+    pub chunk_count: u64,
+    /// Number of POD5 files copied.
+    pub copied_file_count: u64,
+    /// Total bytes copied.
+    pub copied_bytes: u64,
+    /// Number of copied files that failed implemented verification checks.
+    pub verification_failed_count: u64,
+    /// Path to the provenance JSON sidecar.
+    pub provenance_path: PathBuf,
+    /// Per-chunk write summaries.
+    pub chunks: Vec<Pod5SubdivideWriteChunk>,
+}
+
+/// Write summary for one materialized subdivision chunk.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Pod5SubdivideWriteChunk {
+    /// Stable 1-based chunk index.
+    pub index: u64,
+    /// Chunk label from the plan.
+    pub label: String,
+    /// Output directory for the chunk.
+    pub output_dir: PathBuf,
+    /// Files copied into the chunk.
+    pub files: Vec<Pod5SubdivideCopiedFile>,
+}
+
+/// One POD5 file copied during subdivision writing.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Pod5SubdivideCopiedFile {
+    /// Manifest-relative source path.
+    pub relative_path: PathBuf,
+    /// Source POD5 file path.
+    pub source_path: PathBuf,
+    /// Destination POD5 file path.
+    pub destination_path: PathBuf,
+    /// Copied size in bytes.
+    pub size_bytes: u64,
+    /// Verification status after copying.
+    pub verification_status: VerifyStatus,
+}
+
+/// Provenance sidecar written with materialized subdivisions.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Pod5SubdivideProvenance {
+    /// Provenance schema version.
+    pub schema_version: u32,
+    /// Read-only plan used for materialization.
+    pub plan: Pod5SubdividePlan,
+    /// Write report for copied files.
+    pub report: Pod5SubdivideWriteReport,
 }
 
 /// Manifest produced by a playback planner for one POD5 stream.
@@ -771,6 +856,23 @@ pub fn run(cli: Cli) -> Result<String, Pod5ToolsError> {
                 output.as_deref(),
                 format,
             ),
+            SubdivideCommand::Write {
+                path,
+                out,
+                strategy,
+                files_per_chunk,
+                seconds_per_chunk,
+                reads_per_chunk,
+                format,
+            } => run_subdivide_write(
+                &path,
+                &out,
+                strategy,
+                files_per_chunk,
+                seconds_per_chunk,
+                reads_per_chunk,
+                format,
+            ),
         },
         Command::Compare {
             left,
@@ -966,6 +1068,30 @@ fn run_subdivide_plan(
         Ok(format!("wrote subdivide plan to {}", output.display()))
     } else {
         Ok(rendered)
+    }
+}
+
+fn run_subdivide_write(
+    path: &Path,
+    output_dir: &Path,
+    strategy: SubdivideStrategy,
+    files_per_chunk: u64,
+    seconds_per_chunk: Option<u64>,
+    reads_per_chunk: Option<u64>,
+    format: OutputFormat,
+) -> Result<String, Pod5ToolsError> {
+    let report = subdivide_write_from_path(
+        path,
+        output_dir,
+        strategy,
+        files_per_chunk,
+        seconds_per_chunk,
+        reads_per_chunk,
+    )?;
+    match format {
+        OutputFormat::Tsv => Ok(format_subdivide_write_tsv(&report)),
+        OutputFormat::Json => serde_json::to_string_pretty(&report)
+            .map_err(|error| Pod5ToolsError::new(format!("failed to serialize JSON: {error}"))),
     }
 }
 
@@ -1537,6 +1663,150 @@ pub fn subdivide_plan_from_manifest(
     })
 }
 
+/// Materialize a subdivision plan by copying whole POD5 files into chunk folders.
+pub fn subdivide_write_from_path(
+    path: &Path,
+    output_dir: &Path,
+    strategy: SubdivideStrategy,
+    files_per_chunk: u64,
+    seconds_per_chunk: Option<u64>,
+    reads_per_chunk: Option<u64>,
+) -> Result<Pod5SubdivideWriteReport, Pod5ToolsError> {
+    let manifest = manifest_input(path)?;
+    let plan = subdivide_plan_from_manifest(
+        &manifest,
+        strategy,
+        files_per_chunk,
+        seconds_per_chunk,
+        reads_per_chunk,
+    )?;
+    subdivide_write_from_manifest(&manifest, &plan, output_dir)
+}
+
+/// Materialize a subdivision plan from an already loaded manifest.
+pub fn subdivide_write_from_manifest(
+    manifest: &Pod5Manifest,
+    plan: &Pod5SubdividePlan,
+    output_dir: &Path,
+) -> Result<Pod5SubdivideWriteReport, Pod5ToolsError> {
+    fs::create_dir_all(output_dir).map_err(|error| {
+        Pod5ToolsError::new(format!(
+            "failed to create output directory {}: {error}",
+            output_dir.display()
+        ))
+    })?;
+    let entries = manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.relative_path.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut chunks = Vec::new();
+    let mut copied_file_count = 0_u64;
+    let mut copied_bytes = 0_u64;
+    let mut verification_failed_count = 0_u64;
+
+    for chunk in &plan.chunks {
+        let chunk_dir = output_dir.join(format!(
+            "{:04}-{}",
+            chunk.index,
+            safe_filename_component(&chunk.label)
+        ));
+        fs::create_dir_all(&chunk_dir).map_err(|error| {
+            Pod5ToolsError::new(format!(
+                "failed to create chunk directory {}: {error}",
+                chunk_dir.display()
+            ))
+        })?;
+        let mut copied = Vec::new();
+        for relative_path in &chunk.relative_paths {
+            let Some(entry) = entries.get(relative_path) else {
+                return Err(Pod5ToolsError::new(format!(
+                    "subdivision plan references missing manifest entry: {}",
+                    relative_path.display()
+                )));
+            };
+            let destination_path = safe_join_relative(&chunk_dir, relative_path)?;
+            if let Some(parent) = destination_path.parent() {
+                fs::create_dir_all(parent).map_err(|error| {
+                    Pod5ToolsError::new(format!(
+                        "failed to create output directory {}: {error}",
+                        parent.display()
+                    ))
+                })?;
+            }
+            fs::copy(&entry.path, &destination_path).map_err(|error| {
+                Pod5ToolsError::new(format!(
+                    "failed to copy {} to {}: {error}",
+                    entry.path.display(),
+                    destination_path.display()
+                ))
+            })?;
+            let report = verify_pod5_file(&destination_path)?;
+            if report.status == VerifyStatus::Failed {
+                verification_failed_count += 1;
+            }
+            copied_file_count += 1;
+            copied_bytes += report.size_bytes;
+            copied.push(Pod5SubdivideCopiedFile {
+                relative_path: relative_path.clone(),
+                source_path: entry.path.clone(),
+                destination_path,
+                size_bytes: report.size_bytes,
+                verification_status: report.status,
+            });
+        }
+        chunks.push(Pod5SubdivideWriteChunk {
+            index: chunk.index,
+            label: chunk.label.clone(),
+            output_dir: chunk_dir,
+            files: copied,
+        });
+    }
+
+    let provenance_path = output_dir.join("subdivide_provenance.json");
+    let report = Pod5SubdivideWriteReport {
+        source: manifest.source.clone(),
+        output_dir: output_dir.to_path_buf(),
+        strategy: plan.strategy,
+        chunk_count: chunks.len() as u64,
+        copied_file_count,
+        copied_bytes,
+        verification_failed_count,
+        provenance_path,
+        chunks,
+    };
+    let provenance = Pod5SubdivideProvenance {
+        schema_version: SUBDIVIDE_PLAN_SCHEMA_VERSION,
+        plan: plan.clone(),
+        report: report.clone(),
+    };
+    let rendered = serde_json::to_string_pretty(&provenance)
+        .map_err(|error| Pod5ToolsError::new(format!("failed to serialize JSON: {error}")))?;
+    fs::write(&report.provenance_path, rendered).map_err(|error| {
+        Pod5ToolsError::new(format!(
+            "failed to write provenance {}: {error}",
+            report.provenance_path.display()
+        ))
+    })?;
+
+    Ok(report)
+}
+
+fn safe_join_relative(base: &Path, relative_path: &Path) -> Result<PathBuf, Pod5ToolsError> {
+    if relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(Pod5ToolsError::new(format!(
+            "unsafe relative path in subdivision plan: {}",
+            relative_path.display()
+        )));
+    }
+    Ok(base.join(relative_path))
+}
+
 fn file_count_subdivide_chunks(
     entries: &[Pod5ManifestEntry],
     files_per_chunk: u64,
@@ -1822,6 +2092,57 @@ pub fn format_subdivide_plan_tsv(plan: &Pod5SubdividePlan) -> String {
                 .join(","),
             warnings,
         ));
+    }
+    output
+}
+
+/// Format a POD5 subdivision write report as tab-separated text.
+pub fn format_subdivide_write_tsv(report: &Pod5SubdivideWriteReport) -> String {
+    let mut output = String::from(
+        "source\toutput_dir\tstrategy\tchunk_index\tchunk_label\tchunk_output_dir\trelative_path\tsource_path\tdestination_path\tsize_bytes\tverification_status\tprovenance_path",
+    );
+    if report.chunks.is_empty() {
+        output.push('\n');
+        output.push_str(&format!(
+            "{}\t{}\t{}\t\t\t\t\t\t\t0\t\t{}",
+            report.source.display(),
+            report.output_dir.display(),
+            subdivide_strategy_label(&report.strategy),
+            report.provenance_path.display(),
+        ));
+    }
+    for chunk in &report.chunks {
+        if chunk.files.is_empty() {
+            output.push('\n');
+            output.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t\t\t\t0\t\t{}",
+                report.source.display(),
+                report.output_dir.display(),
+                subdivide_strategy_label(&report.strategy),
+                chunk.index,
+                chunk.label,
+                chunk.output_dir.display(),
+                report.provenance_path.display(),
+            ));
+        }
+        for file in &chunk.files {
+            output.push('\n');
+            output.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                report.source.display(),
+                report.output_dir.display(),
+                subdivide_strategy_label(&report.strategy),
+                chunk.index,
+                chunk.label,
+                chunk.output_dir.display(),
+                file.relative_path.display(),
+                file.source_path.display(),
+                file.destination_path.display(),
+                file.size_bytes,
+                verify_status_label(&file.verification_status),
+                report.provenance_path.display(),
+            ));
+        }
     }
     output
 }
@@ -2341,9 +2662,50 @@ mod tests {
             strategy,
             format,
             ..
-        } = command;
+        } = command
+        else {
+            panic!("expected subdivide plan command");
+        };
         assert_eq!(path, PathBuf::from("/data"));
         assert_eq!(strategy, SubdivideStrategy::SampleLabel);
+        assert_eq!(format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn cli_parses_subdivide_write_options() {
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "subdivide",
+            "write",
+            "/data",
+            "--out",
+            "/tmp/subdivided",
+            "--strategy",
+            "file-count",
+            "--files-per-chunk",
+            "2",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        let Command::Subdivide { command } = cli.command else {
+            panic!("expected subdivide command");
+        };
+        let SubdivideCommand::Write {
+            path,
+            out,
+            strategy,
+            files_per_chunk,
+            format,
+            ..
+        } = command
+        else {
+            panic!("expected subdivide write command");
+        };
+        assert_eq!(path, PathBuf::from("/data"));
+        assert_eq!(out, PathBuf::from("/tmp/subdivided"));
+        assert_eq!(strategy, SubdivideStrategy::FileCount);
+        assert_eq!(files_per_chunk, 2);
         assert_eq!(format, OutputFormat::Json);
     }
 
@@ -2964,6 +3326,133 @@ mod tests {
         assert!(message.contains("wrote subdivide plan"));
         assert_eq!(plan.chunks.len(), 1);
         assert_eq!(plan.chunks[0].file_count, 1);
+    }
+
+    #[test]
+    fn subdivide_write_copies_whole_files_and_writes_provenance() {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("input");
+        let nested = input.join("sample-a");
+        let output = root.path().join("output");
+        fs::create_dir_all(&nested).unwrap();
+        write_signature_fixture(&input.join("reads-a.pod5"));
+        write_signature_fixture(&nested.join("reads-b.pod5"));
+
+        let report =
+            subdivide_write_from_path(&input, &output, SubdivideStrategy::FileCount, 1, None, None)
+                .unwrap();
+
+        assert_eq!(report.chunk_count, 2);
+        assert_eq!(report.copied_file_count, 2);
+        assert_eq!(report.copied_bytes, 64);
+        assert_eq!(report.verification_failed_count, 0);
+        assert!(report.provenance_path.is_file());
+        assert!(
+            output
+                .join("0001-chunk-0001")
+                .join("reads-a.pod5")
+                .is_file()
+        );
+        assert!(
+            output
+                .join("0002-chunk-0002")
+                .join("sample-a")
+                .join("reads-b.pod5")
+                .is_file()
+        );
+
+        let provenance: Pod5SubdivideProvenance =
+            serde_json::from_str(&fs::read_to_string(&report.provenance_path).unwrap()).unwrap();
+        assert_eq!(provenance.schema_version, SUBDIVIDE_PLAN_SCHEMA_VERSION);
+        assert_eq!(provenance.report.copied_file_count, 2);
+    }
+
+    #[test]
+    fn run_subdivide_write_emits_tsv_by_default() {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("input");
+        let output = root.path().join("output");
+        fs::create_dir(&input).unwrap();
+        write_signature_fixture(&input.join("reads.pod5"));
+
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "subdivide",
+            "write",
+            input.to_str().unwrap(),
+            "--out",
+            output.to_str().unwrap(),
+        ])
+        .unwrap();
+        let rendered = run(cli).unwrap();
+
+        assert!(rendered.starts_with("source\toutput_dir\tstrategy"));
+        assert!(rendered.contains("reads.pod5"));
+        assert!(rendered.contains("\tincomplete\t"));
+        assert!(output.join("subdivide_provenance.json").is_file());
+    }
+
+    #[test]
+    fn run_subdivide_write_emits_json_when_requested() {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("input");
+        let output = root.path().join("output");
+        fs::create_dir(&input).unwrap();
+        write_signature_fixture(&input.join("reads.pod5"));
+
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "subdivide",
+            "write",
+            input.to_str().unwrap(),
+            "--out",
+            output.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        let rendered = run(cli).unwrap();
+
+        assert!(rendered.contains("\"copied_file_count\": 1"));
+        assert!(rendered.contains("\"verification_failed_count\": 0"));
+    }
+
+    #[test]
+    fn subdivide_write_rejects_unsafe_relative_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("reads.pod5");
+        write_signature_fixture(&source);
+        let manifest = Pod5Manifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            source: root.path().to_path_buf(),
+            entries: vec![Pod5ManifestEntry {
+                relative_path: PathBuf::from("../escape.pod5"),
+                path: source,
+                size_bytes: 32,
+                verification_status: VerifyStatus::Incomplete,
+                verification_failed_checks: 0,
+            }],
+        };
+        let plan = Pod5SubdividePlan {
+            schema_version: SUBDIVIDE_PLAN_SCHEMA_VERSION,
+            source: root.path().to_path_buf(),
+            strategy: SubdivideStrategy::FileCount,
+            target: "1 file(s) per chunk".to_string(),
+            chunks: vec![Pod5SubdivideChunk {
+                index: 1,
+                label: "chunk-0001".to_string(),
+                relative_paths: vec![PathBuf::from("../escape.pod5")],
+                file_count: 1,
+                total_bytes: 32,
+                read_count: None,
+            }],
+            warnings: Vec::new(),
+        };
+
+        let error = subdivide_write_from_manifest(&manifest, &plan, &root.path().join("output"))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("unsafe relative path"));
     }
 
     fn playback_manifest_fixture(path: &Path, batch_path_prefix: &str, buckets: &[f64]) {

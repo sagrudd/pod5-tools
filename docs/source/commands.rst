@@ -264,7 +264,8 @@ Example TSV output:
 -------------
 
 Plan or write temporal and structural POD5 subdivisions for development and
-test fixtures. Current behavior is read-only and writes no POD5 output.
+test fixtures. Planning is read-only. Writing currently materializes plans by
+copying whole POD5 files into chunk directories.
 
 Usage:
 
@@ -275,10 +276,14 @@ Usage:
    cargo run -- subdivide plan /path/to/folder --strategy sample-label
    cargo run -- subdivide plan /path/to/folder --strategy elapsed-time --seconds-per-chunk 900
    cargo run -- subdivide plan /path/to/folder --format json --output plan.json
+   cargo run -- subdivide write /path/to/folder --out /tmp/subdivided --files-per-chunk 4
 
 Current behavior accepts a POD5 file, folder tree, or manifest JSON file. It
 builds a schema version ``1`` subdivision plan from the versioned manifest
-contract. Source POD5 files are never modified.
+contract. ``subdivide write`` uses the same planning contract, creates one
+folder per chunk, copies source POD5 files without modifying them, verifies each
+copied file with implemented checks, and writes ``subdivide_provenance.json`` in
+the output directory.
 
 Strategies:
 
@@ -311,12 +316,45 @@ TSV is emitted by default. JSON is available with ``--format json``. When
 ``--output`` is provided, the rendered plan is written to that file and the
 command prints the output path.
 
+``subdivide write`` TSV fields:
+
+* source path;
+* output directory;
+* strategy;
+* chunk index and label;
+* chunk output directory;
+* relative path;
+* source path;
+* destination path;
+* copied size in bytes;
+* verification status after copying;
+* provenance sidecar path.
+
+Storage and performance caveats:
+
+* writing copies whole POD5 files; it does not yet rewrite POD5 contents by
+  read, signal interval, or elapsed-time window;
+* output storage can temporarily approach the full size of selected input
+  files;
+* existing output files with the same relative paths are overwritten by the
+  copy operation;
+* deep POD5 validation still depends on the future parser backend, so copied
+  files currently receive the same fast extension/signature verification as
+  ``verify``.
+
 Example TSV output:
 
 .. code-block:: text
 
    schema_version	source	strategy	target	chunk_index	chunk_label	file_count	total_bytes	read_count	relative_paths	warnings
    1	/data/run/pod5	file-count	2 file(s) per chunk	1	chunk-0001	2	2097152		reads-a.pod5,reads-b.pod5	
+
+Example write TSV output:
+
+.. code-block:: text
+
+   source	output_dir	strategy	chunk_index	chunk_label	chunk_output_dir	relative_path	source_path	destination_path	size_bytes	verification_status	provenance_path
+   /data/run/pod5	/tmp/subdivided	file-count	1	chunk-0001	/tmp/subdivided/0001-chunk-0001	reads-a.pod5	/data/run/pod5/reads-a.pod5	/tmp/subdivided/0001-chunk-0001/reads-a.pod5	1048576	incomplete	/tmp/subdivided/subdivide_provenance.json
 
 ``playback``
 ------------

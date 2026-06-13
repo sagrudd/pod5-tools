@@ -46,6 +46,7 @@ pod5-tools find /path/to/search
 pod5-tools fileinfo /path/to/file.pod5
 pod5-tools verify /path/to/file.pod5
 pod5-tools folderinfo /path/to/folder
+pod5-tools subdivide write /path/to/folder --out /tmp/subdivided --files-per-chunk 4
 pod5-tools playback plan --manifest playback_manifest.json --sample sample-a
 pod5-tools playback emit --manifest playback_manifest.json --sample sample-a --speedup 5x
 ```

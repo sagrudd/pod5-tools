@@ -15,12 +15,12 @@ buildable or documentable, tested where applicable, committed, and pushed.
 
 ## Slice 2: Buildable Rust Skeleton
 
-- [ ] Add `Cargo.toml` for package `pod5-tools` at version `0.1.0`.
-- [ ] Add `src/lib.rs` with documented public metadata structs for planned
+- [x] Add `Cargo.toml` for package `pod5-tools` at version `0.1.0`.
+- [x] Add `src/lib.rs` with documented public metadata structs for planned
   command outputs.
-- [ ] Add `src/main.rs` using `clap` with subcommand stubs.
-- [ ] Add baseline tests for CLI parsing and library types.
-- [ ] Document build, test, and CLI preview usage in Sphinx.
+- [x] Add `src/main.rs` using `clap` with subcommand stubs.
+- [x] Add baseline tests for CLI parsing and library types.
+- [x] Document build, test, and CLI preview usage in Sphinx.
 
 ## Slice 3: Documentation Build and CI
 

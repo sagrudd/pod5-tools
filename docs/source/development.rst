@@ -7,6 +7,20 @@ Language and Packaging
 ``pod5-tools`` will be implemented in Rust. The command-line interface will use
 ``clap`` and the repository will expose both a binary and a reusable library.
 
+Rust Build and Test
+-------------------
+
+From the repository root:
+
+.. code-block:: sh
+
+   cargo fmt --check
+   cargo test
+   cargo run -- --help
+
+The first Rust slice establishes parser and help coverage only. Command
+behavior is implemented in later todo slices.
+
 Versioning
 ----------
 

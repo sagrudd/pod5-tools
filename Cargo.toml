@@ -1,0 +1,10 @@
+[package]
+name = "pod5-tools"
+version = "0.1.0"
+edition = "2024"
+description = "Operational tooling for Oxford Nanopore POD5 datasets"
+license = "MIT"
+repository = "https://github.com/sagrudd/pod5-tools"
+
+[dependencies]
+clap = { version = "4.5.40", features = ["derive"] }

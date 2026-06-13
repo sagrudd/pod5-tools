@@ -40,11 +40,11 @@ buildable or documentable, tested where applicable, committed, and pushed.
 
 ## Slice 5: POD5 Reader Abstraction
 
-- [ ] Define a reader trait or adapter boundary for POD5 metadata access.
-- [ ] Evaluate Rust-native Arrow access versus binding to the official POD5
+- [x] Define a reader trait or adapter boundary for POD5 metadata access.
+- [x] Evaluate Rust-native Arrow access versus binding to the official POD5
   implementation.
-- [ ] Add error types that separate path, format, schema, and integrity errors.
-- [ ] Add mocked tests that allow command development before large fixtures are
+- [x] Add error types that separate path, format, schema, and integrity errors.
+- [x] Add mocked tests that allow command development before large fixtures are
   committed.
 
 ## Slice 6: `fileinfo`

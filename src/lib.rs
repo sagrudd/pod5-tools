@@ -110,7 +110,7 @@ pub struct Pod5DirectoryRecord {
 }
 
 /// File-level POD5 metadata and integrity status.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Pod5FileInfo {
     /// POD5 file path.
     pub path: PathBuf,
@@ -133,7 +133,7 @@ pub struct Pod5FileInfo {
 }
 
 /// Folder-level summary across multiple POD5 files.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Pod5FolderInfo {
     /// Folder or run tree that was inspected.
     pub path: PathBuf,
@@ -156,7 +156,7 @@ pub struct Pod5FolderInfo {
 }
 
 /// Integrity state for a POD5 file or collection.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum IntegrityStatus {
     /// The file or collection was checked and no integrity problem was found.
     Passed,
@@ -172,6 +172,107 @@ pub enum IntegrityStatus {
         /// Human-readable reason why integrity could not be checked.
         reason: String,
     },
+}
+
+/// Result alias for POD5 metadata reader operations.
+pub type Pod5ReaderResult<T> = Result<T, Pod5ReaderError>;
+
+/// Error returned by POD5 metadata reader adapters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Pod5ReaderError {
+    /// The path could not be opened, read, or statted.
+    Path {
+        /// Path associated with the failure.
+        path: PathBuf,
+        /// Human-readable reason from the backend or operating system.
+        reason: String,
+    },
+    /// The input is not a valid POD5 file or collection for the requested operation.
+    Format {
+        /// Path associated with the failure.
+        path: PathBuf,
+        /// Human-readable reason from the backend.
+        reason: String,
+    },
+    /// The POD5 schema or metadata shape is unsupported or internally inconsistent.
+    Schema {
+        /// Path associated with the failure.
+        path: PathBuf,
+        /// Human-readable reason from the backend.
+        reason: String,
+    },
+    /// Integrity verification found corruption or incomplete data.
+    Integrity {
+        /// Path associated with the failure.
+        path: PathBuf,
+        /// Human-readable reason from the backend.
+        reason: String,
+    },
+}
+
+impl Pod5ReaderError {
+    /// Return the path associated with this reader error.
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Path { path, .. }
+            | Self::Format { path, .. }
+            | Self::Schema { path, .. }
+            | Self::Integrity { path, .. } => path,
+        }
+    }
+
+    /// Return the category name used in machine-readable diagnostics.
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::Path { .. } => "path",
+            Self::Format { .. } => "format",
+            Self::Schema { .. } => "schema",
+            Self::Integrity { .. } => "integrity",
+        }
+    }
+}
+
+impl fmt::Display for Pod5ReaderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Path { path, reason } => {
+                write!(formatter, "path error for {}: {reason}", path.display())
+            }
+            Self::Format { path, reason } => {
+                write!(formatter, "format error for {}: {reason}", path.display())
+            }
+            Self::Schema { path, reason } => {
+                write!(formatter, "schema error for {}: {reason}", path.display())
+            }
+            Self::Integrity { path, reason } => {
+                write!(
+                    formatter,
+                    "integrity error for {}: {reason}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for Pod5ReaderError {}
+
+/// Adapter boundary for POD5 metadata access.
+///
+/// Implementations may be backed by Rust-native Arrow readers, bindings to the
+/// official POD5 implementation, or test doubles. The trait is read-only and
+/// returns metadata contracts used by the command layer.
+pub trait Pod5MetadataReader {
+    /// Read metadata and integrity state for one POD5 file.
+    fn read_file_info(&self, path: &Path) -> Pod5ReaderResult<Pod5FileInfo>;
+}
+
+/// Read file metadata through a POD5 metadata reader adapter.
+pub fn read_pod5_file_info(
+    reader: &impl Pod5MetadataReader,
+    path: &Path,
+) -> Pod5ReaderResult<Pod5FileInfo> {
+    reader.read_file_info(path)
 }
 
 /// Error returned while dispatching a command.
@@ -475,5 +576,67 @@ mod tests {
 
         assert!(output.contains("\"pod5_file_count\": 1"));
         assert!(output.contains("\"total_bytes\": 4"));
+    }
+
+    #[derive(Debug)]
+    struct MockReader {
+        result: Pod5ReaderResult<Pod5FileInfo>,
+    }
+
+    impl Pod5MetadataReader for MockReader {
+        fn read_file_info(&self, _path: &Path) -> Pod5ReaderResult<Pod5FileInfo> {
+            self.result.clone()
+        }
+    }
+
+    #[test]
+    fn metadata_reader_trait_supports_mocked_file_info() {
+        let expected = Pod5FileInfo {
+            path: PathBuf::from("/data/reads.pod5"),
+            size_bytes: 128,
+            flow_cell_id: Some("PBI00001".to_string()),
+            sequencing_kit: Some("SQK-LSK114".to_string()),
+            read_count: Some(25),
+            acquisition_start_utc: Some("2026-06-13T10:00:00Z".to_string()),
+            duration_seconds: Some(42.0),
+            pod5_version: Some("3".to_string()),
+            integrity: IntegrityStatus::Passed,
+        };
+        let reader = MockReader {
+            result: Ok(expected.clone()),
+        };
+
+        let observed = read_pod5_file_info(&reader, Path::new("/data/reads.pod5")).unwrap();
+
+        assert_eq!(observed, expected);
+    }
+
+    #[test]
+    fn reader_errors_keep_distinct_categories() {
+        let path = PathBuf::from("/data/broken.pod5");
+        let errors = [
+            Pod5ReaderError::Path {
+                path: path.clone(),
+                reason: "permission denied".to_string(),
+            },
+            Pod5ReaderError::Format {
+                path: path.clone(),
+                reason: "not a POD5 container".to_string(),
+            },
+            Pod5ReaderError::Schema {
+                path: path.clone(),
+                reason: "unsupported schema version".to_string(),
+            },
+            Pod5ReaderError::Integrity {
+                path: path.clone(),
+                reason: "checksum mismatch".to_string(),
+            },
+        ];
+
+        assert_eq!(errors[0].category(), "path");
+        assert_eq!(errors[1].category(), "format");
+        assert_eq!(errors[2].category(), "schema");
+        assert_eq!(errors[3].category(), "integrity");
+        assert!(errors[3].to_string().contains("integrity error"));
     }
 }

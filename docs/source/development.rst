@@ -47,6 +47,18 @@ From the repository root:
    pip install -r docs/requirements.txt
    sphinx-build -b html docs/source docs/build/html
 
+Continuous Integration
+----------------------
+
+GitHub Actions runs the baseline project checks on pushes and pull requests:
+
+.. code-block:: sh
+
+   cargo fmt --check
+   cargo clippy --all-targets -- -D warnings
+   cargo test
+   python -m sphinx -W -b html docs/source docs/build/html
+
 Automation
 ----------
 

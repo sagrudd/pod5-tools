@@ -1,5 +1,8 @@
 # pod5-tools
 
+[![CI](https://github.com/sagrudd/pod5-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/sagrudd/pod5-tools/actions/workflows/ci.yml)
+[![Documentation Status](https://readthedocs.org/projects/pod5-tools/badge/?version=latest)](https://pod5-tools.readthedocs.io/en/latest/?badge=latest)
+
 `pod5-tools` is a planned Rust toolbox for auditing, discovering, describing,
 and replaying Oxford Nanopore POD5 datasets.
 

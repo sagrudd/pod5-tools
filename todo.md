@@ -24,11 +24,11 @@ buildable or documentable, tested where applicable, committed, and pushed.
 
 ## Slice 3: Documentation Build and CI
 
-- [ ] Add Sphinx requirements and Read the Docs configuration.
-- [ ] Add local documentation build instructions.
-- [ ] Add GitHub Actions or equivalent CI for `cargo fmt`, `cargo clippy`,
+- [x] Add Sphinx requirements and Read the Docs configuration.
+- [x] Add local documentation build instructions.
+- [x] Add GitHub Actions or equivalent CI for `cargo fmt`, `cargo clippy`,
   `cargo test`, and Sphinx build.
-- [ ] Add badges or status notes to the README only after CI exists.
+- [x] Add badges or status notes to the README only after CI exists.
 
 ## Slice 4: `find` Command
 

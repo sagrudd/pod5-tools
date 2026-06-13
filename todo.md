@@ -98,11 +98,11 @@ buildable or documentable, tested where applicable, committed, and pushed.
 
 ## Slice 11: Playback Migration
 
-- [ ] Extract Mnematikon playback concepts into standalone library types.
-- [ ] Migrate speedup, cutoff, bucket scheduling, and manifest tests.
-- [ ] Remove Mnematikon API/session assumptions from the core playback planner.
+- [x] Extract Mnematikon playback concepts into standalone library types.
+- [x] Migrate speedup, cutoff, bucket scheduling, and manifest tests.
+- [x] Remove Mnematikon API/session assumptions from the core playback planner.
 - [ ] Add `playback plan` and `playback emit` CLI surfaces.
-- [ ] Document compatibility notes for existing Mnematikon behavior.
+- [x] Document compatibility notes for existing Mnematikon behavior.
 
 ## Slice 12: Write-Capable Subdivision
 

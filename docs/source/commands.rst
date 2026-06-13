@@ -4,9 +4,9 @@ Command Plan
 The command-line interface is implemented in Rust using ``clap``. ``find``, the
 filesystem-backed part of ``fileinfo``, fast ``verify`` extension/signature
 checks, filesystem-backed ``folderinfo``, versioned ``manifest`` output, basic
-``compare``, and read-only ``subdivide plan`` are implemented. Other command
-behavior provides parser and help coverage until its development slices are
-completed.
+``compare``, read-only ``subdivide plan``, and the first playback library
+contracts are implemented. Other command behavior provides parser and help
+coverage until its development slices are completed.
 
 Preview help:
 
@@ -330,3 +330,27 @@ Preview:
 .. code-block:: sh
 
    cargo run -- playback --input /path/to/source --out /path/to/playback
+
+Current behavior:
+
+* the command-line surface remains a preview while ``playback plan`` and
+  ``playback emit`` are separated into standalone operations;
+* library contracts now exist for playback manifests, batch schedules, sample
+  plans, elapsed-time cutoffs, speedup parsing, and wait calculations;
+* migrated planning helpers are independent of Mnematikon API sessions,
+  flowcell adoption, biosample creation, and upload behavior.
+
+Compatibility notes:
+
+* speedup values follow the existing Mnematikon convention, accepting values
+  such as ``1``, ``1x``, ``2x``, and ``5X``;
+* duration values currently accept seconds and minutes, for example ``300s``
+  and ``5m``;
+* cutoff values accept duration syntax as well as ``all``, ``full``, or
+  ``none`` for all reads;
+* batch emission time is calculated as ``bucket_start_seconds +
+  tempo_seconds`` and schedules are merged across sample streams.
+
+The next playback slice should expose these library contracts through
+``playback plan`` and ``playback emit`` without reintroducing Mnematikon-specific
+API/session assumptions.

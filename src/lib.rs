@@ -373,6 +373,83 @@ pub struct Pod5SubdivideChunk {
     pub read_count: Option<u64>,
 }
 
+/// Manifest produced by a playback planner for one POD5 stream.
+///
+/// This mirrors the generic scheduling contract from the Mnematikon playback
+/// implementation while omitting API session, upload, and flowcell concerns.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackManifest {
+    /// Number of reads included in playback batches.
+    pub read_count: u64,
+    /// Number of source POD5 files used to create the playback stream.
+    pub source_pod5_count: u64,
+    /// Source POD5 files used to create the playback stream.
+    #[serde(default)]
+    pub source_pod5_files: Vec<PathBuf>,
+    /// Sequencing seconds represented by each planning bucket.
+    pub tempo_seconds: f64,
+    /// Optional elapsed-sequencing cutoff in seconds.
+    pub cutoff_seconds: Option<f64>,
+    /// Path to the planner master table when available.
+    pub master_table: PathBuf,
+    /// Playback batches sorted by source sequencing time.
+    pub batches: Vec<PlaybackBatch>,
+}
+
+/// One playback batch scheduled for later emission.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackBatch {
+    /// POD5 batch file to emit.
+    pub path: PathBuf,
+    /// Stable 1-based batch index.
+    pub batch_index: u64,
+    /// Number of reads contained in the batch.
+    pub read_count: u64,
+    /// Number of source POD5 files contributing to this batch.
+    pub source_pod5_count: u64,
+    /// Source POD5 files contributing to this batch.
+    #[serde(default)]
+    pub source_pod5_files: Vec<PathBuf>,
+    /// Bucket start in source sequencing elapsed seconds.
+    pub bucket_start_seconds: f64,
+    /// Minimum read elapsed time in seconds when available.
+    pub min_elapsed_seconds: Option<f64>,
+    /// Maximum read elapsed time in seconds when available.
+    pub max_elapsed_seconds: Option<f64>,
+}
+
+/// Playback plan for one named sample stream.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackSamplePlan {
+    /// Sample or stream label.
+    pub sample: String,
+    /// Original input path.
+    pub input: PathBuf,
+    /// Path to the playback manifest.
+    pub manifest_path: PathBuf,
+    /// Playback manifest loaded from `manifest_path`.
+    pub manifest: PlaybackManifest,
+}
+
+/// Playback cutoff for source sequencing time.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PlaybackCutoff {
+    /// Emit reads up to the provided elapsed-sequencing second.
+    ElapsedSeconds(f64),
+    /// Emit all source reads.
+    All,
+}
+
+impl PlaybackCutoff {
+    /// Return the cutoff in elapsed seconds, or `None` when all reads are requested.
+    pub fn seconds(self) -> Option<f64> {
+        match self {
+            Self::ElapsedSeconds(seconds) => Some(seconds),
+            Self::All => None,
+        }
+    }
+}
+
 /// Integrity state for a POD5 file or collection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum IntegrityStatus {
@@ -1634,6 +1711,154 @@ fn subdivide_strategy_label(strategy: &SubdivideStrategy) -> &'static str {
     }
 }
 
+/// Load a playback manifest JSON file.
+pub fn load_playback_manifest(path: &Path) -> Result<PlaybackManifest, Pod5ToolsError> {
+    let content = fs::read_to_string(path).map_err(|error| {
+        Pod5ToolsError::new(format!("failed to read {}: {error}", path.display()))
+    })?;
+    serde_json::from_str(&content).map_err(|error| {
+        Pod5ToolsError::new(format!(
+            "failed to parse playback manifest {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+/// Parse a playback duration expressed in seconds or minutes.
+pub fn parse_playback_duration_seconds(value: &str) -> Result<f64, Pod5ToolsError> {
+    let value = value.trim();
+    if value.len() < 2 {
+        return Err(Pod5ToolsError::new(format!(
+            "invalid playback duration '{value}'; use values such as 300s or 5m"
+        )));
+    }
+    let (number, unit) = value.split_at(value.len() - 1);
+    let amount = number.parse::<f64>().map_err(|_| {
+        Pod5ToolsError::new(format!(
+            "invalid playback duration '{value}'; use values such as 300s or 5m"
+        ))
+    })?;
+    if !amount.is_finite() || amount <= 0.0 {
+        return Err(Pod5ToolsError::new(format!(
+            "invalid playback duration '{value}'; duration must be greater than zero"
+        )));
+    }
+    match unit {
+        "s" | "S" => Ok(amount),
+        "m" | "M" => Ok(amount * 60.0),
+        _ => Err(Pod5ToolsError::new(format!(
+            "invalid playback duration '{value}'; only seconds (s) and minutes (m) are supported"
+        ))),
+    }
+}
+
+/// Parse a playback cutoff value such as `900s`, `15m`, `all`, or `full`.
+pub fn parse_playback_cutoff(value: &str) -> Result<PlaybackCutoff, Pod5ToolsError> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("all")
+        || trimmed.eq_ignore_ascii_case("full")
+        || trimmed.eq_ignore_ascii_case("none")
+    {
+        return Ok(PlaybackCutoff::All);
+    }
+    Ok(PlaybackCutoff::ElapsedSeconds(
+        parse_playback_duration_seconds(trimmed)?,
+    ))
+}
+
+/// Parse a wall-clock playback speedup value such as `1`, `2x`, or `5X`.
+pub fn parse_playback_speedup(value: &str) -> Result<f64, Pod5ToolsError> {
+    let trimmed = value.trim();
+    let number = trimmed
+        .strip_suffix('x')
+        .or_else(|| trimmed.strip_suffix('X'))
+        .unwrap_or(trimmed)
+        .trim();
+    if number.is_empty() {
+        return Err(Pod5ToolsError::new(format!(
+            "invalid playback speedup '{value}'; use values such as 1x, 2x, or 5x"
+        )));
+    }
+    let speedup = number.parse::<f64>().map_err(|_| {
+        Pod5ToolsError::new(format!(
+            "invalid playback speedup '{value}'; use values such as 1x, 2x, or 5x"
+        ))
+    })?;
+    if !speedup.is_finite() || speedup <= 0.0 {
+        return Err(Pod5ToolsError::new(format!(
+            "invalid playback speedup '{value}'; speedup must be greater than zero"
+        )));
+    }
+    Ok(speedup)
+}
+
+/// Convert source sequencing wait seconds into wall-clock wait seconds.
+pub fn playback_wall_wait_seconds(sequence_wait_seconds: f64, speedup: f64) -> f64 {
+    if !speedup.is_finite() || speedup <= 0.0 {
+        return 0.0;
+    }
+    (sequence_wait_seconds.max(0.0) / speedup).max(0.0)
+}
+
+/// Calculate sequencing-time wait from the previous emitted bucket.
+pub fn playback_sequence_wait_seconds(previous_bucket: Option<f64>, bucket: f64) -> f64 {
+    (bucket - previous_bucket.unwrap_or(0.0)).max(0.0)
+}
+
+/// Human-readable playback speedup label.
+pub fn playback_speedup_label(speedup: f64) -> String {
+    if (speedup.fract()).abs() < f64::EPSILON {
+        format!("{speedup:.0}x")
+    } else {
+        format!("{speedup:.2}x")
+    }
+}
+
+/// Return the source sequencing second at which a batch should be emitted.
+pub fn playback_batch_emit_seconds(manifest: &PlaybackManifest, batch: &PlaybackBatch) -> f64 {
+    (batch.bucket_start_seconds + manifest.tempo_seconds).max(0.0)
+}
+
+/// Stable integer key for comparing playback bucket seconds.
+pub fn playback_bucket_key(bucket_start_seconds: f64) -> i64 {
+    (bucket_start_seconds * 1_000_000.0).round() as i64
+}
+
+/// Merge playback bucket schedules across sample plans.
+pub fn playback_schedule(plans: &[PlaybackSamplePlan]) -> Vec<f64> {
+    let mut buckets = plans
+        .iter()
+        .flat_map(|plan| {
+            plan.manifest
+                .batches
+                .iter()
+                .map(|batch| playback_batch_emit_seconds(&plan.manifest, batch))
+        })
+        .collect::<Vec<_>>();
+    buckets.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    buckets.dedup_by(|left, right| playback_bucket_key(*left) == playback_bucket_key(*right));
+    buckets
+}
+
+/// Make a filesystem-safe label for playback output components.
+pub fn safe_filename_component(value: &str) -> String {
+    let safe = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if safe.is_empty() {
+        "playback".to_string()
+    } else {
+        safe
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2364,6 +2589,170 @@ mod tests {
         assert!(message.contains("wrote subdivide plan"));
         assert_eq!(plan.chunks.len(), 1);
         assert_eq!(plan.chunks[0].file_count, 1);
+    }
+
+    #[test]
+    fn playback_schedule_merges_temporal_buckets_across_samples() {
+        let plans = vec![
+            PlaybackSamplePlan {
+                sample: "A_IDH_1".to_string(),
+                input: PathBuf::from("/pod5/a"),
+                manifest_path: PathBuf::from("/pod5/a/playback_manifest.json"),
+                manifest: PlaybackManifest {
+                    read_count: 2,
+                    source_pod5_count: 1,
+                    source_pod5_files: vec![PathBuf::from("/pod5/a/source.pod5")],
+                    tempo_seconds: 90.0,
+                    cutoff_seconds: Some(180.0),
+                    master_table: PathBuf::from("/pod5/a/master.tsv"),
+                    batches: vec![
+                        PlaybackBatch {
+                            path: PathBuf::from("/pod5/a/001.pod5"),
+                            batch_index: 1,
+                            read_count: 1,
+                            source_pod5_count: 1,
+                            source_pod5_files: vec![PathBuf::from("/pod5/a/source.pod5")],
+                            bucket_start_seconds: 0.0,
+                            min_elapsed_seconds: Some(0.0),
+                            max_elapsed_seconds: Some(1.0),
+                        },
+                        PlaybackBatch {
+                            path: PathBuf::from("/pod5/a/002.pod5"),
+                            batch_index: 2,
+                            read_count: 1,
+                            source_pod5_count: 1,
+                            source_pod5_files: vec![PathBuf::from("/pod5/a/source.pod5")],
+                            bucket_start_seconds: 180.0,
+                            min_elapsed_seconds: Some(180.0),
+                            max_elapsed_seconds: Some(181.0),
+                        },
+                    ],
+                },
+            },
+            PlaybackSamplePlan {
+                sample: "B_IDH_1".to_string(),
+                input: PathBuf::from("/pod5/b"),
+                manifest_path: PathBuf::from("/pod5/b/playback_manifest.json"),
+                manifest: PlaybackManifest {
+                    read_count: 1,
+                    source_pod5_count: 1,
+                    source_pod5_files: vec![PathBuf::from("/pod5/b/source.pod5")],
+                    tempo_seconds: 90.0,
+                    cutoff_seconds: Some(180.0),
+                    master_table: PathBuf::from("/pod5/b/master.tsv"),
+                    batches: vec![PlaybackBatch {
+                        path: PathBuf::from("/pod5/b/001.pod5"),
+                        batch_index: 1,
+                        read_count: 1,
+                        source_pod5_count: 1,
+                        source_pod5_files: vec![PathBuf::from("/pod5/b/source.pod5")],
+                        bucket_start_seconds: 90.0,
+                        min_elapsed_seconds: Some(90.0),
+                        max_elapsed_seconds: Some(91.0),
+                    }],
+                },
+            },
+        ];
+
+        assert_eq!(playback_schedule(&plans), vec![90.0, 180.0, 270.0]);
+    }
+
+    #[test]
+    fn playback_speedup_scales_waits_without_changing_sequence_time() {
+        assert_eq!(parse_playback_speedup("1").unwrap(), 1.0);
+        assert_eq!(parse_playback_speedup("2x").unwrap(), 2.0);
+        assert_eq!(parse_playback_speedup("5X").unwrap(), 5.0);
+        assert_eq!(playback_wall_wait_seconds(180.0, 5.0), 36.0);
+        assert_eq!(playback_wall_wait_seconds(-1.0, 5.0), 0.0);
+        assert_eq!(playback_sequence_wait_seconds(Some(0.0), 180.0), 180.0);
+        assert_eq!(playback_sequence_wait_seconds(Some(180.0), 270.0), 90.0);
+        assert_eq!(playback_sequence_wait_seconds(Some(270.0), 180.0), 0.0);
+        assert_eq!(playback_speedup_label(5.0), "5x");
+        assert_eq!(playback_speedup_label(2.5), "2.50x");
+    }
+
+    #[test]
+    fn playback_speedup_rejects_zero_or_invalid_values() {
+        assert!(
+            parse_playback_speedup("0x")
+                .unwrap_err()
+                .to_string()
+                .contains("greater than zero")
+        );
+        assert!(
+            parse_playback_speedup("fast")
+                .unwrap_err()
+                .to_string()
+                .contains("invalid playback speedup")
+        );
+    }
+
+    #[test]
+    fn playback_duration_parser_accepts_seconds_and_minutes() {
+        assert_eq!(parse_playback_duration_seconds("300s").unwrap(), 300.0);
+        assert_eq!(parse_playback_duration_seconds("5m").unwrap(), 300.0);
+    }
+
+    #[test]
+    fn playback_duration_parser_rejects_unsupported_units() {
+        let error = parse_playback_duration_seconds("1h").unwrap_err();
+        assert!(error.to_string().contains("seconds"));
+    }
+
+    #[test]
+    fn playback_cutoff_parser_accepts_all_reads() {
+        assert_eq!(parse_playback_cutoff("all").unwrap(), PlaybackCutoff::All);
+        assert_eq!(parse_playback_cutoff("full").unwrap(), PlaybackCutoff::All);
+        assert_eq!(
+            parse_playback_cutoff("900s").unwrap(),
+            PlaybackCutoff::ElapsedSeconds(900.0)
+        );
+        assert_eq!(parse_playback_cutoff("none").unwrap(), PlaybackCutoff::All);
+    }
+
+    #[test]
+    fn playback_manifest_loads_from_json() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest_path = root.path().join("playback_manifest.json");
+        fs::write(
+            &manifest_path,
+            r#"{
+              "read_count": 2,
+              "source_pod5_count": 1,
+              "source_pod5_files": ["/source/reads.pod5"],
+              "tempo_seconds": 90.0,
+              "cutoff_seconds": 180.0,
+              "master_table": "/playback/master.tsv",
+              "batches": [
+                {
+                  "path": "/playback/batch-001.pod5",
+                  "batch_index": 1,
+                  "read_count": 2,
+                  "source_pod5_count": 1,
+                  "source_pod5_files": ["/source/reads.pod5"],
+                  "bucket_start_seconds": 0.0,
+                  "min_elapsed_seconds": 0.0,
+                  "max_elapsed_seconds": 12.5
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let manifest = load_playback_manifest(&manifest_path).unwrap();
+
+        assert_eq!(manifest.read_count, 2);
+        assert_eq!(manifest.batches.len(), 1);
+        assert_eq!(
+            manifest.batches[0].path,
+            PathBuf::from("/playback/batch-001.pod5")
+        );
+    }
+
+    #[test]
+    fn safe_filename_component_replaces_unsafe_characters() {
+        assert_eq!(safe_filename_component("Sample A/1"), "Sample_A_1");
+        assert_eq!(safe_filename_component(""), "playback");
     }
 
     #[derive(Debug)]

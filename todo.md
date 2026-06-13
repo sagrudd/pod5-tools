@@ -72,12 +72,12 @@ buildable or documentable, tested where applicable, committed, and pushed.
 
 ## Slice 8: `folderinfo`
 
-- [ ] Aggregate `fileinfo` records across a folder.
-- [ ] Detect mixed flow cells, mixed sequencing kits, duplicate names, suspicious
+- [x] Aggregate `fileinfo` records across a folder.
+- [x] Detect mixed flow cells, mixed sequencing kits, duplicate names, suspicious
   temporal gaps, unreadable files, and partial/integrity failures.
-- [ ] Provide machine-readable summary output.
-- [ ] Add tests for mixed and clean folder scenarios.
-- [ ] Document examples for sequencing core handoff checks.
+- [x] Provide machine-readable summary output.
+- [x] Add tests for mixed and clean folder scenarios.
+- [x] Document examples for sequencing core handoff checks.
 
 ## Slice 9: Manifest and Compare Planning
 

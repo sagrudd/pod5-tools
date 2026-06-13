@@ -5,6 +5,7 @@
 //! the binary can expose while POD5 reading support is developed in later
 //! slices.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -162,6 +163,14 @@ pub struct Pod5FolderInfo {
     pub acquisition_end_utc: Option<String>,
     /// Integrity status summarising all inspected files.
     pub integrity: IntegrityStatus,
+    /// Number of files that could not be read by the active metadata reader.
+    pub failed_file_count: u64,
+    /// Number of files with at least one implemented verification failure.
+    pub verification_failed_count: u64,
+    /// Duplicate POD5 basenames observed in different paths.
+    pub duplicate_file_names: Vec<String>,
+    /// Warnings for checks that could not be completed with the active reader.
+    pub warnings: Vec<String>,
 }
 
 /// Overall status from `pod5-tools verify`.
@@ -420,7 +429,7 @@ pub fn run(cli: Cli) -> Result<String, Pod5ToolsError> {
             return run_fileinfo(&FilesystemPod5MetadataReader, &path, format);
         }
         Command::Verify { path, format } => return run_verify(&path, format),
-        Command::Folderinfo { .. } => "folderinfo",
+        Command::Folderinfo { path, format } => return run_folderinfo(&path, format),
         Command::Playback { .. } => "playback",
         Command::Manifest { .. } => "manifest",
         Command::Subdivide { .. } => "subdivide",
@@ -546,6 +555,15 @@ fn run_verify(path: &Path, format: OutputFormat) -> Result<String, Pod5ToolsErro
     match format {
         OutputFormat::Tsv => Ok(format_verify_report_tsv(&report)),
         OutputFormat::Json => serde_json::to_string_pretty(&report)
+            .map_err(|error| Pod5ToolsError::new(format!("failed to serialize JSON: {error}"))),
+    }
+}
+
+fn run_folderinfo(path: &Path, format: OutputFormat) -> Result<String, Pod5ToolsError> {
+    let info = folder_info(path, &FilesystemPod5MetadataReader)?;
+    match format {
+        OutputFormat::Tsv => Ok(format_folder_info_tsv(&info)),
+        OutputFormat::Json => serde_json::to_string_pretty(&info)
             .map_err(|error| Pod5ToolsError::new(format!("failed to serialize JSON: {error}"))),
     }
 }
@@ -712,6 +730,146 @@ fn verify_status(checks: &[VerifyCheck]) -> VerifyStatus {
     }
 }
 
+/// Aggregate file-level metadata and fast verification state for a folder.
+pub fn folder_info(
+    root: &Path,
+    reader: &impl Pod5MetadataReader,
+) -> Result<Pod5FolderInfo, Pod5ToolsError> {
+    let metadata = fs::metadata(root).map_err(|error| {
+        Pod5ToolsError::new(format!("failed to inspect {}: {error}", root.display()))
+    })?;
+    if !metadata.is_dir() {
+        return Err(Pod5ToolsError::new(format!(
+            "folderinfo expects a directory: {}",
+            root.display()
+        )));
+    }
+
+    let mut files = Vec::new();
+    collect_pod5_files(root, &mut files)?;
+    files.sort();
+
+    let mut total_bytes = 0_u64;
+    let mut total_reads = 0_u64;
+    let mut saw_read_count = false;
+    let mut flow_cell_ids = BTreeSet::<String>::new();
+    let mut sequencing_kits = BTreeSet::<String>::new();
+    let mut starts = Vec::<String>::new();
+    let mut failed_file_count = 0_u64;
+    let mut verification_failed_count = 0_u64;
+    let mut names = BTreeMap::<String, u64>::new();
+
+    for file in &files {
+        if let Some(name) = file.file_name().and_then(|name| name.to_str()) {
+            *names.entry(name.to_string()).or_default() += 1;
+        }
+
+        match read_pod5_file_info(reader, file) {
+            Ok(info) => {
+                total_bytes += info.size_bytes;
+                if let Some(read_count) = info.read_count {
+                    saw_read_count = true;
+                    total_reads += read_count;
+                }
+                if let Some(flow_cell_id) = info.flow_cell_id {
+                    flow_cell_ids.insert(flow_cell_id);
+                }
+                if let Some(sequencing_kit) = info.sequencing_kit {
+                    sequencing_kits.insert(sequencing_kit);
+                }
+                if let Some(start) = info.acquisition_start_utc {
+                    starts.push(start);
+                }
+            }
+            Err(_) => failed_file_count += 1,
+        }
+
+        if verify_pod5_file(file).is_ok_and(|report| report.status == VerifyStatus::Failed) {
+            verification_failed_count += 1;
+        }
+    }
+
+    starts.sort();
+    let duplicate_file_names = names
+        .into_iter()
+        .filter_map(|(name, count)| (count > 1).then_some(name))
+        .collect::<Vec<_>>();
+    let mut warnings = Vec::new();
+    if flow_cell_ids.is_empty() {
+        warnings
+            .push("flow cell metadata unavailable with current POD5 reader backend".to_string());
+    }
+    if sequencing_kits.is_empty() {
+        warnings.push(
+            "sequencing kit metadata unavailable with current POD5 reader backend".to_string(),
+        );
+    }
+    if starts.len() < files.len() {
+        warnings.push("acquisition timestamps unavailable for one or more files; temporal gap checks are incomplete".to_string());
+    }
+    if !duplicate_file_names.is_empty() {
+        warnings.push("duplicate POD5 file names detected".to_string());
+    }
+    if verification_failed_count > 0 {
+        warnings.push("one or more files failed implemented verification checks".to_string());
+    }
+    if failed_file_count > 0 {
+        warnings.push("one or more files could not be read by the metadata reader".to_string());
+    }
+
+    let integrity = if failed_file_count > 0 || verification_failed_count > 0 {
+        IntegrityStatus::Failed {
+            reason: "one or more files failed metadata or verification checks".to_string(),
+        }
+    } else if files.is_empty() {
+        IntegrityStatus::NotChecked
+    } else {
+        IntegrityStatus::Unavailable {
+            reason: "deep POD5 integrity requires the parser backend".to_string(),
+        }
+    };
+
+    Ok(Pod5FolderInfo {
+        path: root.to_path_buf(),
+        pod5_file_count: files.len() as u64,
+        total_bytes,
+        total_reads: saw_read_count.then_some(total_reads),
+        flow_cell_ids: flow_cell_ids.into_iter().collect(),
+        sequencing_kits: sequencing_kits.into_iter().collect(),
+        acquisition_start_utc: starts.first().cloned(),
+        acquisition_end_utc: starts.last().cloned(),
+        integrity,
+        failed_file_count,
+        verification_failed_count,
+        duplicate_file_names,
+        warnings,
+    })
+}
+
+fn collect_pod5_files(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), Pod5ToolsError> {
+    let entries = fs::read_dir(directory).map_err(|error| {
+        Pod5ToolsError::new(format!("failed to read {}: {error}", directory.display()))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            Pod5ToolsError::new(format!(
+                "failed to read entry in {}: {error}",
+                directory.display()
+            ))
+        })?;
+        let path = entry.path();
+        let metadata = entry.metadata().map_err(|error| {
+            Pod5ToolsError::new(format!("failed to inspect {}: {error}", path.display()))
+        })?;
+        if metadata.is_dir() {
+            collect_pod5_files(&path, files)?;
+        } else if metadata.is_file() && is_pod5_path(&path) {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
 /// Format POD5 directory records as tab-separated text.
 pub fn format_directory_records_tsv(records: &[Pod5DirectoryRecord]) -> String {
     let mut output = String::from(
@@ -796,6 +954,30 @@ fn verify_check_status_label(status: &VerifyCheckStatus) -> &'static str {
         VerifyCheckStatus::Failed => "failed",
         VerifyCheckStatus::NotChecked => "not_checked",
     }
+}
+
+/// Format folder-level POD5 metadata as tab-separated text.
+pub fn format_folder_info_tsv(info: &Pod5FolderInfo) -> String {
+    let (integrity_status, integrity_reason) = integrity_tsv_fields(&info.integrity);
+    format!(
+        "path\tpod5_file_count\ttotal_bytes\ttotal_reads\tflow_cell_ids\tsequencing_kits\tacquisition_start_utc\tacquisition_end_utc\tintegrity_status\tintegrity_reason\tfailed_file_count\tverification_failed_count\tduplicate_file_names\twarnings\n{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        info.path.display(),
+        info.pod5_file_count,
+        info.total_bytes,
+        info.total_reads
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        info.flow_cell_ids.join(","),
+        info.sequencing_kits.join(","),
+        info.acquisition_start_utc.as_deref().unwrap_or(""),
+        info.acquisition_end_utc.as_deref().unwrap_or(""),
+        integrity_status,
+        integrity_reason,
+        info.failed_file_count,
+        info.verification_failed_count,
+        info.duplicate_file_names.join(","),
+        info.warnings.join("; "),
+    )
 }
 
 #[cfg(test)]
@@ -886,9 +1068,9 @@ mod tests {
 
     #[test]
     fn run_returns_stub_message_for_parsed_command() {
-        let cli = Cli::try_parse_from(["pod5-tools", "folderinfo", "/data"]).unwrap();
+        let cli = Cli::try_parse_from(["pod5-tools", "manifest", "/data"]).unwrap();
         let message = run(cli).unwrap();
-        assert!(message.contains("folderinfo"));
+        assert!(message.contains("manifest"));
         assert!(message.contains("not implemented yet"));
     }
 
@@ -1134,6 +1316,88 @@ mod tests {
         assert!(output.contains("\"status\": \"incomplete\""));
         assert!(output.contains("\"name\": \"leading_signature\""));
         assert!(output.contains("\"status\": \"not_checked\""));
+    }
+
+    #[test]
+    fn folderinfo_aggregates_pod5_files_recursively() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        write_signature_fixture(&root.path().join("reads-a.pod5"));
+        write_signature_fixture(&nested.join("reads-b.pod5"));
+        fs::write(root.path().join("notes.txt"), b"ignore").unwrap();
+
+        let info = folder_info(root.path(), &FilesystemPod5MetadataReader).unwrap();
+
+        assert_eq!(info.pod5_file_count, 2);
+        assert_eq!(info.total_bytes, 64);
+        assert_eq!(info.verification_failed_count, 0);
+        assert_eq!(info.failed_file_count, 0);
+        assert!(matches!(
+            info.integrity,
+            IntegrityStatus::Unavailable { .. }
+        ));
+        assert!(
+            info.warnings
+                .iter()
+                .any(|warning| warning.contains("flow cell metadata unavailable"))
+        );
+    }
+
+    #[test]
+    fn folderinfo_reports_duplicate_names_and_verification_failures() {
+        let root = tempfile::tempdir().unwrap();
+        let sample_a = root.path().join("sample-a");
+        let sample_b = root.path().join("sample-b");
+        fs::create_dir(&sample_a).unwrap();
+        fs::create_dir(&sample_b).unwrap();
+        write_signature_fixture(&sample_a.join("reads.pod5"));
+        fs::write(sample_b.join("reads.pod5"), b"not-pod5-but-long-enough").unwrap();
+
+        let info = folder_info(root.path(), &FilesystemPod5MetadataReader).unwrap();
+
+        assert_eq!(info.pod5_file_count, 2);
+        assert_eq!(info.verification_failed_count, 1);
+        assert_eq!(info.duplicate_file_names, vec!["reads.pod5".to_string()]);
+        assert!(matches!(info.integrity, IntegrityStatus::Failed { .. }));
+        assert!(
+            info.warnings
+                .iter()
+                .any(|warning| warning.contains("duplicate POD5 file names"))
+        );
+    }
+
+    #[test]
+    fn run_folderinfo_emits_tsv_by_default() {
+        let root = tempfile::tempdir().unwrap();
+        write_signature_fixture(&root.path().join("reads.pod5"));
+
+        let cli = Cli::try_parse_from(["pod5-tools", "folderinfo", root.path().to_str().unwrap()])
+            .unwrap();
+        let output = run(cli).unwrap();
+
+        assert!(output.starts_with("path\tpod5_file_count\ttotal_bytes"));
+        assert!(output.contains("\t1\t32\t"));
+        assert!(output.contains("deep POD5 integrity requires the parser backend"));
+    }
+
+    #[test]
+    fn run_folderinfo_emits_json_when_requested() {
+        let root = tempfile::tempdir().unwrap();
+        write_signature_fixture(&root.path().join("reads.pod5"));
+
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "folderinfo",
+            root.path().to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        let output = run(cli).unwrap();
+
+        assert!(output.contains("\"pod5_file_count\": 1"));
+        assert!(output.contains("\"verification_failed_count\": 0"));
     }
 
     #[derive(Debug)]

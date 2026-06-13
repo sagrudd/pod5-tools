@@ -2,9 +2,10 @@ Command Plan
 ============
 
 The command-line interface is implemented in Rust using ``clap``. ``find``, the
-filesystem-backed part of ``fileinfo``, and fast ``verify`` extension/signature
-checks are implemented. Other command behavior provides parser and help coverage
-until its development slices are completed.
+filesystem-backed part of ``fileinfo``, fast ``verify`` extension/signature
+checks, and filesystem-backed ``folderinfo`` are implemented. Other command
+behavior provides parser and help coverage until its development slices are
+completed.
 
 Preview help:
 
@@ -141,14 +142,47 @@ Example TSV output:
 
 Aggregate file-level metadata across a folder or run tree.
 
-Preview:
+Usage:
 
 .. code-block:: sh
 
    cargo run -- folderinfo /path/to/folder
+   cargo run -- folderinfo /path/to/folder --format json
 
-Planned checks include mixed flow cells, mixed sequencing kits, duplicate file
-names, acquisition-time gaps, unreadable files, and integrity failures.
+Current behavior recursively finds ``.pod5`` files, aggregates the current
+``fileinfo`` fields, and runs the implemented ``verify`` checks for each file.
+
+TSV is emitted by default. JSON is available with ``--format json``.
+
+Output fields:
+
+* folder path;
+* POD5 file count;
+* total bytes;
+* total reads when available;
+* distinct flow cell IDs when available;
+* distinct sequencing kits when available;
+* acquisition start and end times when available;
+* aggregate integrity status;
+* failed file count;
+* verification failed count;
+* duplicate file names;
+* warnings.
+
+Operational caveats:
+
+* mixed flow cell, mixed sequencing kit, and temporal-gap checks depend on POD5
+  metadata that is not yet available from the filesystem-only reader;
+* duplicate file-name detection and fast verification failure detection are
+  active now;
+* deep integrity still requires the future POD5 parser backend.
+
+Example TSV output:
+
+.. code-block:: text
+
+   path	pod5_file_count	total_bytes	total_reads	flow_cell_ids	sequencing_kits	acquisition_start_utc	acquisition_end_utc	integrity_status	integrity_reason	failed_file_count	verification_failed_count	duplicate_file_names	warnings
+   /data/run/pod5	24	781246272						unavailable	deep POD5 integrity requires the parser backend	0	0		flow cell metadata unavailable with current POD5 reader backend
 
 ``manifest``
 ------------

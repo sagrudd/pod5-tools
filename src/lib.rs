@@ -82,8 +82,9 @@ pub enum Command {
     },
     /// Plan temporal or structural POD5 subdivisions.
     Subdivide {
-        /// Source POD5 file, folder, or manifest.
-        path: PathBuf,
+        /// Subdivision action to run.
+        #[command(subcommand)]
+        command: SubdivideCommand,
     },
     /// Compare two POD5 collections or manifests.
     Compare {
@@ -91,6 +92,34 @@ pub enum Command {
         left: PathBuf,
         /// Right-hand collection or manifest.
         right: PathBuf,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Tsv)]
+        format: OutputFormat,
+    },
+}
+
+/// Supported subdivision actions.
+#[derive(Debug, Subcommand)]
+pub enum SubdivideCommand {
+    /// Create a read-only subdivision plan.
+    Plan {
+        /// Source POD5 file, folder, or manifest.
+        path: PathBuf,
+        /// Planning strategy.
+        #[arg(long, value_enum, default_value_t = SubdivideStrategy::FileCount)]
+        strategy: SubdivideStrategy,
+        /// Maximum files per chunk for file-count planning.
+        #[arg(long, default_value_t = 1)]
+        files_per_chunk: u64,
+        /// Target elapsed seconds per chunk for elapsed-time planning.
+        #[arg(long)]
+        seconds_per_chunk: Option<u64>,
+        /// Target reads per chunk for read-count planning.
+        #[arg(long)]
+        reads_per_chunk: Option<u64>,
+        /// Optional output path. Standard output is used when omitted.
+        #[arg(long)]
+        output: Option<PathBuf>,
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Tsv)]
         format: OutputFormat,
@@ -105,6 +134,20 @@ pub enum OutputFormat {
     Tsv,
     /// JSON for structured integrations.
     Json,
+}
+
+/// Read-only subdivision planning strategies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum SubdivideStrategy {
+    /// Group manifest entries into chunks containing at most `files_per_chunk` files.
+    FileCount,
+    /// Group files by acquisition elapsed time when temporal metadata is available.
+    ElapsedTime,
+    /// Group files by read counts when POD5 read-count metadata is available.
+    ReadCount,
+    /// Group files by sample label inferred from the first manifest-relative path component.
+    SampleLabel,
 }
 
 /// Metadata for one directory that contains POD5 files.
@@ -291,6 +334,43 @@ pub struct Pod5CompareChange {
     pub left_verification_status: VerifyStatus,
     /// Right verification status.
     pub right_verification_status: VerifyStatus,
+}
+
+/// Current subdivision plan schema version.
+pub const SUBDIVIDE_PLAN_SCHEMA_VERSION: u32 = 1;
+
+/// Read-only plan describing how a POD5 collection could be subdivided.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Pod5SubdividePlan {
+    /// Subdivision plan schema version.
+    pub schema_version: u32,
+    /// Source path used to create the plan.
+    pub source: PathBuf,
+    /// Planning strategy used to create chunks.
+    pub strategy: SubdivideStrategy,
+    /// Human-readable target used by the selected strategy.
+    pub target: String,
+    /// Planned chunks, sorted deterministically.
+    pub chunks: Vec<Pod5SubdivideChunk>,
+    /// Warnings describing metadata gaps or planning limitations.
+    pub warnings: Vec<String>,
+}
+
+/// One planned subdivision chunk.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Pod5SubdivideChunk {
+    /// Stable 1-based chunk index.
+    pub index: u64,
+    /// Suggested label for sidecar manifests or future output folders.
+    pub label: String,
+    /// Manifest-relative POD5 paths assigned to the chunk.
+    pub relative_paths: Vec<PathBuf>,
+    /// Number of files assigned to the chunk.
+    pub file_count: u64,
+    /// Total bytes assigned to the chunk.
+    pub total_bytes: u64,
+    /// Read count assigned to the chunk when available.
+    pub read_count: Option<u64>,
 }
 
 /// Integrity state for a POD5 file or collection.
@@ -506,7 +586,27 @@ pub fn run(cli: Cli) -> Result<String, Pod5ToolsError> {
             output,
             format,
         } => return run_manifest(&path, output.as_deref(), format),
-        Command::Subdivide { .. } => "subdivide",
+        Command::Subdivide { command } => match command {
+            SubdivideCommand::Plan {
+                path,
+                strategy,
+                files_per_chunk,
+                seconds_per_chunk,
+                reads_per_chunk,
+                output,
+                format,
+            } => {
+                return run_subdivide_plan(
+                    &path,
+                    strategy,
+                    files_per_chunk,
+                    seconds_per_chunk,
+                    reads_per_chunk,
+                    output.as_deref(),
+                    format,
+                );
+            }
+        },
         Command::Compare {
             left,
             right,
@@ -673,6 +773,37 @@ fn run_compare(left: &Path, right: &Path, format: OutputFormat) -> Result<String
         OutputFormat::Tsv => Ok(format_compare_report_tsv(&report)),
         OutputFormat::Json => serde_json::to_string_pretty(&report)
             .map_err(|error| Pod5ToolsError::new(format!("failed to serialize JSON: {error}"))),
+    }
+}
+
+fn run_subdivide_plan(
+    path: &Path,
+    strategy: SubdivideStrategy,
+    files_per_chunk: u64,
+    seconds_per_chunk: Option<u64>,
+    reads_per_chunk: Option<u64>,
+    output: Option<&Path>,
+    format: OutputFormat,
+) -> Result<String, Pod5ToolsError> {
+    let plan = subdivide_plan_from_path(
+        path,
+        strategy,
+        files_per_chunk,
+        seconds_per_chunk,
+        reads_per_chunk,
+    )?;
+    let rendered = match format {
+        OutputFormat::Tsv => format_subdivide_plan_tsv(&plan),
+        OutputFormat::Json => serde_json::to_string_pretty(&plan)
+            .map_err(|error| Pod5ToolsError::new(format!("failed to serialize JSON: {error}")))?,
+    };
+    if let Some(output) = output {
+        fs::write(output, rendered).map_err(|error| {
+            Pod5ToolsError::new(format!("failed to write {}: {error}", output.display()))
+        })?;
+        Ok(format!("wrote subdivide plan to {}", output.display()))
+    } else {
+        Ok(rendered)
     }
 }
 
@@ -1128,6 +1259,149 @@ pub fn compare_manifests(
     })
 }
 
+/// Create a read-only subdivision plan from a POD5 file, folder, or manifest.
+pub fn subdivide_plan_from_path(
+    path: &Path,
+    strategy: SubdivideStrategy,
+    files_per_chunk: u64,
+    seconds_per_chunk: Option<u64>,
+    reads_per_chunk: Option<u64>,
+) -> Result<Pod5SubdividePlan, Pod5ToolsError> {
+    let manifest = manifest_input(path)?;
+    subdivide_plan_from_manifest(
+        &manifest,
+        strategy,
+        files_per_chunk,
+        seconds_per_chunk,
+        reads_per_chunk,
+    )
+}
+
+/// Create a read-only subdivision plan from an already loaded manifest.
+pub fn subdivide_plan_from_manifest(
+    manifest: &Pod5Manifest,
+    strategy: SubdivideStrategy,
+    files_per_chunk: u64,
+    seconds_per_chunk: Option<u64>,
+    reads_per_chunk: Option<u64>,
+) -> Result<Pod5SubdividePlan, Pod5ToolsError> {
+    let mut warnings = Vec::new();
+    let (target, chunks) = match strategy {
+        SubdivideStrategy::FileCount => {
+            if files_per_chunk == 0 {
+                return Err(Pod5ToolsError::new(
+                    "files-per-chunk must be greater than zero",
+                ));
+            }
+            (
+                format!("{files_per_chunk} file(s) per chunk"),
+                file_count_subdivide_chunks(&manifest.entries, files_per_chunk),
+            )
+        }
+        SubdivideStrategy::SampleLabel => (
+            "first relative-path component as sample label".to_string(),
+            sample_label_subdivide_chunks(&manifest.entries),
+        ),
+        SubdivideStrategy::ElapsedTime => {
+            let seconds = seconds_per_chunk.unwrap_or(3600);
+            warnings.push(
+                "elapsed-time planning requires acquisition timestamps from the POD5 reader backend; emitted one placeholder chunk"
+                    .to_string(),
+            );
+            (
+                format!("{seconds} second(s) per chunk"),
+                placeholder_subdivide_chunk(&manifest.entries, "elapsed-time-unavailable"),
+            )
+        }
+        SubdivideStrategy::ReadCount => {
+            let reads = reads_per_chunk.unwrap_or(100_000);
+            warnings.push(
+                "read-count planning requires read counts from the POD5 reader backend; emitted one placeholder chunk"
+                    .to_string(),
+            );
+            (
+                format!("{reads} read(s) per chunk"),
+                placeholder_subdivide_chunk(&manifest.entries, "read-count-unavailable"),
+            )
+        }
+    };
+
+    Ok(Pod5SubdividePlan {
+        schema_version: SUBDIVIDE_PLAN_SCHEMA_VERSION,
+        source: manifest.source.clone(),
+        strategy,
+        target,
+        chunks,
+        warnings,
+    })
+}
+
+fn file_count_subdivide_chunks(
+    entries: &[Pod5ManifestEntry],
+    files_per_chunk: u64,
+) -> Vec<Pod5SubdivideChunk> {
+    entries
+        .chunks(files_per_chunk as usize)
+        .enumerate()
+        .map(|(index, chunk_entries)| subdivide_chunk(index as u64 + 1, None, chunk_entries))
+        .collect()
+}
+
+fn sample_label_subdivide_chunks(entries: &[Pod5ManifestEntry]) -> Vec<Pod5SubdivideChunk> {
+    let mut grouped = BTreeMap::<String, Vec<Pod5ManifestEntry>>::new();
+    for entry in entries {
+        let label = entry
+            .relative_path
+            .components()
+            .next()
+            .and_then(|component| component.as_os_str().to_str())
+            .unwrap_or("unlabelled")
+            .to_string();
+        grouped.entry(label).or_default().push(entry.clone());
+    }
+
+    grouped
+        .into_iter()
+        .enumerate()
+        .map(|(index, (label, entries))| {
+            subdivide_chunk(index as u64 + 1, Some(label.as_str()), &entries)
+        })
+        .collect()
+}
+
+fn placeholder_subdivide_chunk(
+    entries: &[Pod5ManifestEntry],
+    label: &str,
+) -> Vec<Pod5SubdivideChunk> {
+    if entries.is_empty() {
+        Vec::new()
+    } else {
+        vec![subdivide_chunk(1, Some(label), entries)]
+    }
+}
+
+fn subdivide_chunk(
+    index: u64,
+    label: Option<&str>,
+    entries: &[Pod5ManifestEntry],
+) -> Pod5SubdivideChunk {
+    let relative_paths = entries
+        .iter()
+        .map(|entry| entry.relative_path.clone())
+        .collect::<Vec<_>>();
+    let total_bytes = entries.iter().map(|entry| entry.size_bytes).sum();
+    Pod5SubdivideChunk {
+        index,
+        label: label
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("chunk-{index:04}")),
+        relative_paths,
+        file_count: entries.len() as u64,
+        total_bytes,
+        read_count: None,
+    }
+}
+
 /// Format POD5 directory records as tab-separated text.
 pub fn format_directory_records_tsv(records: &[Pod5DirectoryRecord]) -> String {
     let mut output = String::from(
@@ -1306,6 +1580,60 @@ fn compare_status_label(status: &CompareStatus) -> &'static str {
     }
 }
 
+/// Format a POD5 subdivision plan as tab-separated text.
+pub fn format_subdivide_plan_tsv(plan: &Pod5SubdividePlan) -> String {
+    let mut output = String::from(
+        "schema_version\tsource\tstrategy\ttarget\tchunk_index\tchunk_label\tfile_count\ttotal_bytes\tread_count\trelative_paths\twarnings",
+    );
+    let warnings = plan.warnings.join("; ");
+    if plan.chunks.is_empty() {
+        output.push('\n');
+        output.push_str(&format!(
+            "{}\t{}\t{}\t{}\t\t\t0\t0\t\t\t{}",
+            plan.schema_version,
+            plan.source.display(),
+            subdivide_strategy_label(&plan.strategy),
+            plan.target,
+            warnings,
+        ));
+    }
+    for chunk in &plan.chunks {
+        output.push('\n');
+        output.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            plan.schema_version,
+            plan.source.display(),
+            subdivide_strategy_label(&plan.strategy),
+            plan.target,
+            chunk.index,
+            chunk.label,
+            chunk.file_count,
+            chunk.total_bytes,
+            chunk
+                .read_count
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            chunk
+                .relative_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            warnings,
+        ));
+    }
+    output
+}
+
+fn subdivide_strategy_label(strategy: &SubdivideStrategy) -> &'static str {
+    match strategy {
+        SubdivideStrategy::FileCount => "file-count",
+        SubdivideStrategy::ElapsedTime => "elapsed-time",
+        SubdivideStrategy::ReadCount => "read-count",
+        SubdivideStrategy::SampleLabel => "sample-label",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1393,11 +1721,30 @@ mod tests {
     }
 
     #[test]
-    fn run_returns_stub_message_for_parsed_command() {
-        let cli = Cli::try_parse_from(["pod5-tools", "subdivide", "/data"]).unwrap();
-        let message = run(cli).unwrap();
-        assert!(message.contains("subdivide"));
-        assert!(message.contains("not implemented yet"));
+    fn cli_parses_subdivide_plan_options() {
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "subdivide",
+            "plan",
+            "/data",
+            "--strategy",
+            "sample-label",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        let Command::Subdivide { command } = cli.command else {
+            panic!("expected subdivide command");
+        };
+        let SubdivideCommand::Plan {
+            path,
+            strategy,
+            format,
+            ..
+        } = command;
+        assert_eq!(path, PathBuf::from("/data"));
+        assert_eq!(strategy, SubdivideStrategy::SampleLabel);
+        assert_eq!(format, OutputFormat::Json);
     }
 
     #[test]
@@ -1858,6 +2205,165 @@ mod tests {
 
         assert!(output.contains("\"status\": \"different\""));
         assert!(output.contains("missing_from_right"));
+    }
+
+    #[test]
+    fn subdivide_file_count_plan_groups_manifest_entries() {
+        let manifest = Pod5Manifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            source: PathBuf::from("/data/run"),
+            entries: vec![
+                Pod5ManifestEntry {
+                    relative_path: PathBuf::from("a.pod5"),
+                    path: PathBuf::from("/data/run/a.pod5"),
+                    size_bytes: 10,
+                    verification_status: VerifyStatus::Incomplete,
+                    verification_failed_checks: 0,
+                },
+                Pod5ManifestEntry {
+                    relative_path: PathBuf::from("b.pod5"),
+                    path: PathBuf::from("/data/run/b.pod5"),
+                    size_bytes: 20,
+                    verification_status: VerifyStatus::Incomplete,
+                    verification_failed_checks: 0,
+                },
+                Pod5ManifestEntry {
+                    relative_path: PathBuf::from("c.pod5"),
+                    path: PathBuf::from("/data/run/c.pod5"),
+                    size_bytes: 30,
+                    verification_status: VerifyStatus::Incomplete,
+                    verification_failed_checks: 0,
+                },
+            ],
+        };
+
+        let plan =
+            subdivide_plan_from_manifest(&manifest, SubdivideStrategy::FileCount, 2, None, None)
+                .unwrap();
+
+        assert_eq!(plan.schema_version, SUBDIVIDE_PLAN_SCHEMA_VERSION);
+        assert_eq!(plan.chunks.len(), 2);
+        assert_eq!(plan.chunks[0].label, "chunk-0001");
+        assert_eq!(plan.chunks[0].file_count, 2);
+        assert_eq!(plan.chunks[0].total_bytes, 30);
+        assert_eq!(plan.chunks[1].relative_paths, vec![PathBuf::from("c.pod5")]);
+    }
+
+    #[test]
+    fn subdivide_sample_label_plan_groups_by_first_relative_component() {
+        let manifest = Pod5Manifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            source: PathBuf::from("/data/run"),
+            entries: vec![
+                Pod5ManifestEntry {
+                    relative_path: PathBuf::from("sample-a/reads-1.pod5"),
+                    path: PathBuf::from("/data/run/sample-a/reads-1.pod5"),
+                    size_bytes: 10,
+                    verification_status: VerifyStatus::Incomplete,
+                    verification_failed_checks: 0,
+                },
+                Pod5ManifestEntry {
+                    relative_path: PathBuf::from("sample-b/reads-1.pod5"),
+                    path: PathBuf::from("/data/run/sample-b/reads-1.pod5"),
+                    size_bytes: 20,
+                    verification_status: VerifyStatus::Incomplete,
+                    verification_failed_checks: 0,
+                },
+                Pod5ManifestEntry {
+                    relative_path: PathBuf::from("sample-a/reads-2.pod5"),
+                    path: PathBuf::from("/data/run/sample-a/reads-2.pod5"),
+                    size_bytes: 30,
+                    verification_status: VerifyStatus::Incomplete,
+                    verification_failed_checks: 0,
+                },
+            ],
+        };
+
+        let plan =
+            subdivide_plan_from_manifest(&manifest, SubdivideStrategy::SampleLabel, 1, None, None)
+                .unwrap();
+
+        assert_eq!(plan.chunks.len(), 2);
+        assert_eq!(plan.chunks[0].label, "sample-a");
+        assert_eq!(plan.chunks[0].file_count, 2);
+        assert_eq!(plan.chunks[0].total_bytes, 40);
+        assert_eq!(plan.chunks[1].label, "sample-b");
+    }
+
+    #[test]
+    fn subdivide_elapsed_time_plan_reports_metadata_gap() {
+        let manifest = Pod5Manifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            source: PathBuf::from("/data/run"),
+            entries: vec![Pod5ManifestEntry {
+                relative_path: PathBuf::from("reads.pod5"),
+                path: PathBuf::from("/data/run/reads.pod5"),
+                size_bytes: 10,
+                verification_status: VerifyStatus::Incomplete,
+                verification_failed_checks: 0,
+            }],
+        };
+
+        let plan = subdivide_plan_from_manifest(
+            &manifest,
+            SubdivideStrategy::ElapsedTime,
+            1,
+            Some(900),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(plan.target, "900 second(s) per chunk");
+        assert_eq!(plan.chunks[0].label, "elapsed-time-unavailable");
+        assert!(plan.warnings[0].contains("acquisition timestamps"));
+    }
+
+    #[test]
+    fn run_subdivide_plan_emits_tsv_by_default() {
+        let root = tempfile::tempdir().unwrap();
+        write_signature_fixture(&root.path().join("reads-a.pod5"));
+        write_signature_fixture(&root.path().join("reads-b.pod5"));
+
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "subdivide",
+            "plan",
+            root.path().to_str().unwrap(),
+            "--files-per-chunk",
+            "2",
+        ])
+        .unwrap();
+        let output = run(cli).unwrap();
+
+        assert!(output.starts_with("schema_version\tsource\tstrategy"));
+        assert!(output.contains("\tfile-count\t2 file(s) per chunk\t1\tchunk-0001\t2\t64"));
+        assert!(output.contains("reads-a.pod5,reads-b.pod5"));
+    }
+
+    #[test]
+    fn run_subdivide_plan_writes_json_output_file() {
+        let root = tempfile::tempdir().unwrap();
+        write_signature_fixture(&root.path().join("reads.pod5"));
+        let output_path = root.path().join("plan.json");
+
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "subdivide",
+            "plan",
+            root.path().to_str().unwrap(),
+            "--format",
+            "json",
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .unwrap();
+        let message = run(cli).unwrap();
+        let plan: Pod5SubdividePlan =
+            serde_json::from_str(&fs::read_to_string(&output_path).unwrap()).unwrap();
+
+        assert!(message.contains("wrote subdivide plan"));
+        assert_eq!(plan.chunks.len(), 1);
+        assert_eq!(plan.chunks[0].file_count, 1);
     }
 
     #[derive(Debug)]

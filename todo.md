@@ -90,11 +90,11 @@ buildable or documentable, tested where applicable, committed, and pushed.
 
 ## Slice 10: Subdivision Planning
 
-- [ ] Implement `subdivide plan` for elapsed-time, file-count, read-count, and
+- [x] Implement `subdivide plan` for elapsed-time, file-count, read-count, and
   sample-label strategies.
-- [ ] Keep planning read-only in this slice.
-- [ ] Add deterministic tests for generated plans.
-- [ ] Document how plans can feed workflow development.
+- [x] Keep planning read-only in this slice.
+- [x] Add deterministic tests for generated plans.
+- [x] Document how plans can feed workflow development.
 
 ## Slice 11: Playback Migration
 

@@ -3,9 +3,10 @@ Command Plan
 
 The command-line interface is implemented in Rust using ``clap``. ``find``, the
 filesystem-backed part of ``fileinfo``, fast ``verify`` extension/signature
-checks, filesystem-backed ``folderinfo``, versioned ``manifest`` output, and
-basic ``compare`` are implemented. Other command behavior provides parser and
-help coverage until its development slices are completed.
+checks, filesystem-backed ``folderinfo``, versioned ``manifest`` output, basic
+``compare``, and read-only ``subdivide plan`` are implemented. Other command
+behavior provides parser and help coverage until its development slices are
+completed.
 
 Preview help:
 
@@ -263,14 +264,59 @@ Example TSV output:
 -------------
 
 Plan or write temporal and structural POD5 subdivisions for development and
-test fixtures. Early work should implement read-only planning before writing
-new POD5 files.
+test fixtures. Current behavior is read-only and writes no POD5 output.
 
-Preview:
+Usage:
 
 .. code-block:: sh
 
-   cargo run -- subdivide /path/to/folder
+   cargo run -- subdivide plan /path/to/folder
+   cargo run -- subdivide plan /path/to/folder --files-per-chunk 4
+   cargo run -- subdivide plan /path/to/folder --strategy sample-label
+   cargo run -- subdivide plan /path/to/folder --strategy elapsed-time --seconds-per-chunk 900
+   cargo run -- subdivide plan /path/to/folder --format json --output plan.json
+
+Current behavior accepts a POD5 file, folder tree, or manifest JSON file. It
+builds a schema version ``1`` subdivision plan from the versioned manifest
+contract. Source POD5 files are never modified.
+
+Strategies:
+
+* ``file-count`` groups manifest entries into deterministic chunks containing
+  at most ``--files-per-chunk`` files. This is the default strategy.
+* ``sample-label`` groups files by the first component of each
+  manifest-relative path, which is useful for run trees arranged as
+  ``sample/file.pod5``.
+* ``elapsed-time`` records the requested ``--seconds-per-chunk`` target but
+  emits one placeholder chunk until acquisition timestamps are available from
+  the POD5 reader backend.
+* ``read-count`` records the requested ``--reads-per-chunk`` target but emits
+  one placeholder chunk until read counts are available from the POD5 reader
+  backend.
+
+Schema version 1 fields:
+
+* ``schema_version``;
+* source path;
+* strategy;
+* target;
+* chunk index and label;
+* relative paths assigned to the chunk;
+* file count;
+* byte total;
+* read count when available;
+* warnings.
+
+TSV is emitted by default. JSON is available with ``--format json``. When
+``--output`` is provided, the rendered plan is written to that file and the
+command prints the output path.
+
+Example TSV output:
+
+.. code-block:: text
+
+   schema_version	source	strategy	target	chunk_index	chunk_label	file_count	total_bytes	read_count	relative_paths	warnings
+   1	/data/run/pod5	file-count	2 file(s) per chunk	1	chunk-0001	2	2097152		reads-a.pod5,reads-b.pod5	
 
 ``playback``
 ------------

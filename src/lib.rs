@@ -257,6 +257,51 @@ impl fmt::Display for Pod5ReaderError {
 
 impl std::error::Error for Pod5ReaderError {}
 
+/// Filesystem-only POD5 metadata reader.
+///
+/// This reader validates that an input is a `.pod5` file and reports file size.
+/// POD5-internal fields are left unavailable until a concrete POD5 parser
+/// backend is connected behind `Pod5MetadataReader`.
+#[derive(Debug, Default)]
+pub struct FilesystemPod5MetadataReader;
+
+impl Pod5MetadataReader for FilesystemPod5MetadataReader {
+    fn read_file_info(&self, path: &Path) -> Pod5ReaderResult<Pod5FileInfo> {
+        let metadata = fs::metadata(path).map_err(|error| Pod5ReaderError::Path {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+        if !metadata.is_file() {
+            return Err(Pod5ReaderError::Path {
+                path: path.to_path_buf(),
+                reason: "expected a file".to_string(),
+            });
+        }
+        if !is_pod5_path(path) {
+            return Err(Pod5ReaderError::Format {
+                path: path.to_path_buf(),
+                reason: "expected a .pod5 file".to_string(),
+            });
+        }
+
+        Ok(Pod5FileInfo {
+            path: path.to_path_buf(),
+            size_bytes: metadata.len(),
+            flow_cell_id: None,
+            sequencing_kit: None,
+            read_count: None,
+            acquisition_start_utc: None,
+            duration_seconds: None,
+            pod5_version: None,
+            integrity: IntegrityStatus::Unavailable {
+                reason:
+                    "POD5 parser backend not configured; only filesystem metadata was inspected"
+                        .to_string(),
+            },
+        })
+    }
+}
+
 /// Adapter boundary for POD5 metadata access.
 ///
 /// Implementations may be backed by Rust-native Arrow readers, bindings to the
@@ -298,6 +343,12 @@ impl fmt::Display for Pod5ToolsError {
 
 impl std::error::Error for Pod5ToolsError {}
 
+impl From<Pod5ReaderError> for Pod5ToolsError {
+    fn from(error: Pod5ReaderError) -> Self {
+        Self::new(error.to_string())
+    }
+}
+
 /// Dispatch a parsed command.
 ///
 /// Current subcommands are stubs: they parse arguments and return a stable
@@ -306,7 +357,9 @@ impl std::error::Error for Pod5ToolsError {}
 pub fn run(cli: Cli) -> Result<String, Pod5ToolsError> {
     let command = match cli.command {
         Command::Find { path, format } => return run_find(path, format),
-        Command::Fileinfo { .. } => "fileinfo",
+        Command::Fileinfo { path, format } => {
+            return run_fileinfo(&FilesystemPod5MetadataReader, &path, format);
+        }
         Command::Folderinfo { .. } => "folderinfo",
         Command::Playback { .. } => "playback",
         Command::Manifest { .. } => "manifest",
@@ -415,6 +468,19 @@ fn run_find(path: PathBuf, format: OutputFormat) -> Result<String, Pod5ToolsErro
     }
 }
 
+fn run_fileinfo(
+    reader: &impl Pod5MetadataReader,
+    path: &Path,
+    format: OutputFormat,
+) -> Result<String, Pod5ToolsError> {
+    let info = read_pod5_file_info(reader, path)?;
+    match format {
+        OutputFormat::Tsv => Ok(format_file_info_tsv(&info)),
+        OutputFormat::Json => serde_json::to_string_pretty(&info)
+            .map_err(|error| Pod5ToolsError::new(format!("failed to serialize JSON: {error}"))),
+    }
+}
+
 /// Format POD5 directory records as tab-separated text.
 pub fn format_directory_records_tsv(records: &[Pod5DirectoryRecord]) -> String {
     let mut output = String::from(
@@ -432,6 +498,37 @@ pub fn format_directory_records_tsv(records: &[Pod5DirectoryRecord]) -> String {
         ));
     }
     output
+}
+
+/// Format one POD5 file metadata record as tab-separated text.
+pub fn format_file_info_tsv(info: &Pod5FileInfo) -> String {
+    let (integrity_status, integrity_reason) = integrity_tsv_fields(&info.integrity);
+    format!(
+        "path\tsize_bytes\tflow_cell_id\tsequencing_kit\tread_count\tacquisition_start_utc\tduration_seconds\tpod5_version\tintegrity_status\tintegrity_reason\n{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        info.path.display(),
+        info.size_bytes,
+        info.flow_cell_id.as_deref().unwrap_or(""),
+        info.sequencing_kit.as_deref().unwrap_or(""),
+        info.read_count
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        info.acquisition_start_utc.as_deref().unwrap_or(""),
+        info.duration_seconds
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        info.pod5_version.as_deref().unwrap_or(""),
+        integrity_status,
+        integrity_reason,
+    )
+}
+
+fn integrity_tsv_fields(integrity: &IntegrityStatus) -> (&'static str, &str) {
+    match integrity {
+        IntegrityStatus::Passed => ("passed", ""),
+        IntegrityStatus::Failed { reason } => ("failed", reason),
+        IntegrityStatus::NotChecked => ("not_checked", ""),
+        IntegrityStatus::Unavailable { reason } => ("unavailable", reason),
+    }
 }
 
 #[cfg(test)]
@@ -576,6 +673,72 @@ mod tests {
 
         assert!(output.contains("\"pod5_file_count\": 1"));
         assert!(output.contains("\"total_bytes\": 4"));
+    }
+
+    #[test]
+    fn filesystem_fileinfo_reports_size_and_unavailable_integrity() {
+        let root = tempfile::tempdir().unwrap();
+        let pod5 = root.path().join("reads.pod5");
+        fs::write(&pod5, b"pod5-bytes").unwrap();
+
+        let reader = FilesystemPod5MetadataReader;
+        let info = read_pod5_file_info(&reader, &pod5).unwrap();
+
+        assert_eq!(info.path, pod5);
+        assert_eq!(info.size_bytes, 10);
+        assert_eq!(info.flow_cell_id, None);
+        assert!(matches!(
+            info.integrity,
+            IntegrityStatus::Unavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn filesystem_fileinfo_rejects_non_pod5_files() {
+        let root = tempfile::tempdir().unwrap();
+        let text_file = root.path().join("reads.txt");
+        fs::write(&text_file, b"not pod5").unwrap();
+
+        let reader = FilesystemPod5MetadataReader;
+        let error = read_pod5_file_info(&reader, &text_file).unwrap_err();
+
+        assert_eq!(error.category(), "format");
+        assert!(error.to_string().contains("expected a .pod5 file"));
+    }
+
+    #[test]
+    fn run_fileinfo_emits_tsv_by_default() {
+        let root = tempfile::tempdir().unwrap();
+        let pod5 = root.path().join("reads.pod5");
+        fs::write(&pod5, b"pod5").unwrap();
+
+        let cli = Cli::try_parse_from(["pod5-tools", "fileinfo", pod5.to_str().unwrap()]).unwrap();
+        let output = run(cli).unwrap();
+
+        assert!(output.starts_with("path\tsize_bytes\tflow_cell_id"));
+        assert!(output.contains("\t4\t"));
+        assert!(output.contains("\tunavailable\tPOD5 parser backend not configured"));
+    }
+
+    #[test]
+    fn run_fileinfo_emits_json_when_requested() {
+        let root = tempfile::tempdir().unwrap();
+        let pod5 = root.path().join("reads.pod5");
+        fs::write(&pod5, b"pod5").unwrap();
+
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "fileinfo",
+            pod5.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        let output = run(cli).unwrap();
+
+        assert!(output.contains("\"size_bytes\": 4"));
+        assert!(output.contains("\"flow_cell_id\": null"));
+        assert!(output.contains("\"Unavailable\""));
     }
 
     #[derive(Debug)]

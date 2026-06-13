@@ -1,9 +1,9 @@
 Command Plan
 ============
 
-The command-line interface is implemented in Rust using ``clap``. ``find`` is
-implemented. Other commands provide parser and help coverage until their
-development slices are completed.
+The command-line interface is implemented in Rust using ``clap``. ``find`` and
+the filesystem-backed part of ``fileinfo`` are implemented. Other commands
+provide parser and help coverage until their development slices are completed.
 
 Preview help:
 
@@ -50,13 +50,21 @@ Example TSV output:
 
 Inspect a single POD5 file.
 
-Preview:
+Usage:
 
 .. code-block:: sh
 
+   cargo run -- fileinfo /path/to/file.pod5
    cargo run -- fileinfo /path/to/file.pod5 --format json
 
-Planned output fields include:
+Current behavior validates that the input exists, is a file, and has a
+``.pod5`` extension. It reports file size and emits the planned metadata fields.
+Until a concrete POD5 reader backend is connected, POD5-internal fields are
+empty or ``null`` and integrity is reported as unavailable.
+
+TSV is emitted by default. JSON is available with ``--format json``.
+
+Output fields:
 
 * path and file size;
 * flow cell ID;
@@ -66,6 +74,19 @@ Planned output fields include:
 * duration of data;
 * POD5 schema/version information;
 * integrity status.
+
+Operational caveats:
+
+* ``fileinfo`` does not yet parse POD5 internals.
+* ``fileinfo`` does not yet prove that the file is intact.
+* missing files, directories, and non-POD5 files fail before output is emitted.
+
+Example TSV output:
+
+.. code-block:: text
+
+   path	size_bytes	flow_cell_id	sequencing_kit	read_count	acquisition_start_utc	duration_seconds	pod5_version	integrity_status	integrity_reason
+   /data/run/pod5/reads.pod5	1048576								unavailable	POD5 parser backend not configured; only filesystem metadata was inspected
 
 ``folderinfo``
 --------------

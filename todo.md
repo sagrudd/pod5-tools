@@ -49,12 +49,12 @@ buildable or documentable, tested where applicable, committed, and pushed.
 
 ## Slice 6: `fileinfo`
 
-- [ ] Implement file-level metadata extraction.
-- [ ] Report flow cell ID, sequencing kit, read count, acquisition start,
+- [x] Implement file-level metadata extraction.
+- [x] Report flow cell ID, sequencing kit, read count, acquisition start,
   duration, file size, schema/version, and integrity status when available.
-- [ ] Support TSV and JSON output.
-- [ ] Add tests for success and failure paths.
-- [ ] Document operational caveats and field definitions.
+- [x] Support TSV and JSON output.
+- [x] Add tests for success and failure paths.
+- [x] Document operational caveats and field definitions.
 
 ## Slice 7: `folderinfo`
 

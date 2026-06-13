@@ -32,11 +32,11 @@ buildable or documentable, tested where applicable, committed, and pushed.
 
 ## Slice 4: `find` Command
 
-- [ ] Implement recursive POD5 folder discovery.
-- [ ] Emit TSV by default and JSON with an explicit option.
-- [ ] Include path, POD5 file count, byte total, newest mtime, and oldest mtime.
-- [ ] Add tests using temporary directory fixtures.
-- [ ] Document output fields and examples.
+- [x] Implement recursive POD5 folder discovery.
+- [x] Emit TSV by default and JSON with an explicit option.
+- [x] Include path, POD5 file count, byte total, newest mtime, and oldest mtime.
+- [x] Add tests using temporary directory fixtures.
+- [x] Document output fields and examples.
 
 ## Slice 5: POD5 Reader Abstraction
 

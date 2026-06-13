@@ -1,9 +1,9 @@
 Command Plan
 ============
 
-The command-line interface is implemented in Rust using ``clap``. The current
-binary provides parser and help coverage for the planned subcommands, but the
-commands are implementation stubs until their development slices are completed.
+The command-line interface is implemented in Rust using ``clap``. ``find`` is
+implemented. Other commands provide parser and help coverage until their
+development slices are completed.
 
 Preview help:
 
@@ -17,19 +17,33 @@ Preview help:
 
 Find directories containing one or more POD5 files.
 
-Preview:
+Usage:
 
 .. code-block:: sh
 
    cargo run -- find /path/to/search
+   cargo run -- find /path/to/search --format json
 
-Planned output fields include:
+The command recursively walks the search root and reports one row for each
+directory that directly contains one or more files with a ``.pod5`` extension.
+The extension match is case-insensitive. Source files are not modified.
+
+TSV is emitted by default. JSON is available with ``--format json``.
+
+Output fields:
 
 * directory path;
 * POD5 file count;
 * total bytes;
 * oldest modification time;
 * newest modification time.
+
+Example TSV output:
+
+.. code-block:: text
+
+   path	pod5_file_count	total_bytes	oldest_modified_utc	newest_modified_utc
+   /data/run/pod5	24	781246272	2026-06-13T09:12:30+00:00	2026-06-13T10:45:03+00:00
 
 ``fileinfo``
 ------------

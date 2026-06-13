@@ -6,9 +6,13 @@
 //! slices.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 
 /// Command-line parser for the `pod5-tools` binary.
 #[derive(Debug, Parser)]
@@ -81,7 +85,8 @@ pub enum Command {
 }
 
 /// Machine-readable command output formats.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     /// Tab-separated values for shell and workflow integration.
     Tsv,
@@ -90,7 +95,7 @@ pub enum OutputFormat {
 }
 
 /// Metadata for one directory that contains POD5 files.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Pod5DirectoryRecord {
     /// Directory containing one or more `.pod5` files.
     pub path: PathBuf,
@@ -199,7 +204,7 @@ impl std::error::Error for Pod5ToolsError {}
 /// development slices.
 pub fn run(cli: Cli) -> Result<String, Pod5ToolsError> {
     let command = match cli.command {
-        Command::Find { .. } => "find",
+        Command::Find { path, format } => return run_find(path, format),
         Command::Fileinfo { .. } => "fileinfo",
         Command::Folderinfo { .. } => "folderinfo",
         Command::Playback { .. } => "playback",
@@ -210,6 +215,122 @@ pub fn run(cli: Cli) -> Result<String, Pod5ToolsError> {
     Ok(format!(
         "pod5-tools {command} is not implemented yet; see todo.md for the development plan"
     ))
+}
+
+/// Recursively find directories that contain POD5 files.
+pub fn find_pod5_directories(root: PathBuf) -> Result<Vec<Pod5DirectoryRecord>, Pod5ToolsError> {
+    let metadata = fs::metadata(&root).map_err(|error| {
+        Pod5ToolsError::new(format!("failed to inspect {}: {error}", root.display()))
+    })?;
+    if !metadata.is_dir() {
+        return Err(Pod5ToolsError::new(format!(
+            "find expects a directory: {}",
+            root.display()
+        )));
+    }
+
+    let mut records = Vec::<Pod5DirectoryRecord>::new();
+    collect_pod5_directories(&root, &mut records)?;
+    records.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(records)
+}
+
+fn collect_pod5_directories(
+    directory: &Path,
+    records: &mut Vec<Pod5DirectoryRecord>,
+) -> Result<(), Pod5ToolsError> {
+    let mut pod5_file_count = 0_u64;
+    let mut total_bytes = 0_u64;
+    let mut oldest_modified = None::<SystemTime>;
+    let mut newest_modified = None::<SystemTime>;
+    let mut child_directories = Vec::<PathBuf>::new();
+
+    let entries = fs::read_dir(directory).map_err(|error| {
+        Pod5ToolsError::new(format!("failed to read {}: {error}", directory.display()))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            Pod5ToolsError::new(format!(
+                "failed to read entry in {}: {error}",
+                directory.display()
+            ))
+        })?;
+        let path = entry.path();
+        let metadata = entry.metadata().map_err(|error| {
+            Pod5ToolsError::new(format!("failed to inspect {}: {error}", path.display()))
+        })?;
+        if metadata.is_dir() {
+            child_directories.push(path);
+        } else if metadata.is_file() && is_pod5_path(&path) {
+            pod5_file_count += 1;
+            total_bytes += metadata.len();
+            if let Ok(modified) = metadata.modified() {
+                oldest_modified = Some(match oldest_modified {
+                    Some(current) => current.min(modified),
+                    None => modified,
+                });
+                newest_modified = Some(match newest_modified {
+                    Some(current) => current.max(modified),
+                    None => modified,
+                });
+            }
+        }
+    }
+
+    if pod5_file_count > 0 {
+        records.push(Pod5DirectoryRecord {
+            path: directory.to_path_buf(),
+            pod5_file_count,
+            total_bytes,
+            oldest_modified_utc: oldest_modified.map(system_time_to_rfc3339),
+            newest_modified_utc: newest_modified.map(system_time_to_rfc3339),
+        });
+    }
+
+    child_directories.sort();
+    for child in child_directories {
+        collect_pod5_directories(&child, records)?;
+    }
+
+    Ok(())
+}
+
+fn is_pod5_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pod5"))
+}
+
+fn system_time_to_rfc3339(time: SystemTime) -> String {
+    DateTime::<Utc>::from(time).to_rfc3339()
+}
+
+fn run_find(path: PathBuf, format: OutputFormat) -> Result<String, Pod5ToolsError> {
+    let records = find_pod5_directories(path)?;
+    match format {
+        OutputFormat::Tsv => Ok(format_directory_records_tsv(&records)),
+        OutputFormat::Json => serde_json::to_string_pretty(&records)
+            .map_err(|error| Pod5ToolsError::new(format!("failed to serialize JSON: {error}"))),
+    }
+}
+
+/// Format POD5 directory records as tab-separated text.
+pub fn format_directory_records_tsv(records: &[Pod5DirectoryRecord]) -> String {
+    let mut output = String::from(
+        "path\tpod5_file_count\ttotal_bytes\toldest_modified_utc\tnewest_modified_utc",
+    );
+    for record in records {
+        output.push('\n');
+        output.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}",
+            record.path.display(),
+            record.pod5_file_count,
+            record.total_bytes,
+            record.oldest_modified_utc.as_deref().unwrap_or(""),
+            record.newest_modified_utc.as_deref().unwrap_or("")
+        ));
+    }
+    output
 }
 
 #[cfg(test)]
@@ -287,5 +408,72 @@ mod tests {
         let message = run(cli).unwrap();
         assert!(message.contains("folderinfo"));
         assert!(message.contains("not implemented yet"));
+    }
+
+    #[test]
+    fn find_groups_pod5_files_by_immediate_parent_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let sample_a = root.path().join("sample-a");
+        let sample_b = root.path().join("nested").join("sample-b");
+        fs::create_dir(&sample_a).unwrap();
+        fs::create_dir_all(&sample_b).unwrap();
+        fs::write(sample_a.join("reads-1.pod5"), b"1234").unwrap();
+        fs::write(sample_a.join("reads-2.POD5"), b"12").unwrap();
+        fs::write(sample_a.join("notes.txt"), b"ignore").unwrap();
+        fs::write(sample_b.join("reads-3.pod5"), b"123").unwrap();
+
+        let records = find_pod5_directories(root.path().to_path_buf()).unwrap();
+
+        let sample_a_record = records
+            .iter()
+            .find(|record| record.path == sample_a)
+            .expect("sample-a should be reported");
+        let sample_b_record = records
+            .iter()
+            .find(|record| record.path == sample_b)
+            .expect("sample-b should be reported");
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(sample_a_record.pod5_file_count, 2);
+        assert_eq!(sample_a_record.total_bytes, 6);
+        assert_eq!(sample_b_record.pod5_file_count, 1);
+        assert_eq!(sample_b_record.total_bytes, 3);
+        assert!(sample_a_record.oldest_modified_utc.is_some());
+        assert!(sample_a_record.newest_modified_utc.is_some());
+    }
+
+    #[test]
+    fn find_tsv_includes_header_and_records() {
+        let record = Pod5DirectoryRecord {
+            path: PathBuf::from("/data/sample-a"),
+            pod5_file_count: 2,
+            total_bytes: 6,
+            oldest_modified_utc: Some("2026-06-13T10:00:00+00:00".to_string()),
+            newest_modified_utc: Some("2026-06-13T10:05:00+00:00".to_string()),
+        };
+
+        let output = format_directory_records_tsv(&[record]);
+
+        assert!(output.starts_with("path\tpod5_file_count\ttotal_bytes"));
+        assert!(output.contains("/data/sample-a\t2\t6"));
+    }
+
+    #[test]
+    fn run_find_emits_json_when_requested() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("reads.pod5"), b"1234").unwrap();
+
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "find",
+            root.path().to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        let output = run(cli).unwrap();
+
+        assert!(output.contains("\"pod5_file_count\": 1"));
+        assert!(output.contains("\"total_bytes\": 4"));
     }
 }

@@ -1,7 +1,7 @@
 pod5-tools documentation
 ========================
 
-``pod5-tools`` is a planned Rust command-line and library toolbox for
+``pod5-tools`` is an early-stage Rust command-line and library toolbox for
 discovering, inspecting, verifying, subdividing, and replaying Oxford Nanopore
 POD5 data collections.
 
@@ -17,4 +17,5 @@ signal data.
    overview
    commands
    development
+   changelog
    roadmap

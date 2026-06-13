@@ -114,8 +114,8 @@ buildable or documentable, tested where applicable, committed, and pushed.
 
 ## Slice 13: Release Preparation
 
-- [ ] Audit all public structs and functions for Rust documentation comments.
-- [ ] Ensure README and Sphinx docs match implemented behavior.
-- [ ] Confirm semantic version and changelog/release notes.
-- [ ] Run full test and documentation build.
-- [ ] Tag only after explicit release approval.
+- [x] Audit all public structs and functions for Rust documentation comments.
+- [x] Ensure README and Sphinx docs match implemented behavior.
+- [x] Confirm semantic version and changelog/release notes.
+- [x] Run full test and documentation build.
+- [x] Defer tagging until explicit release approval.

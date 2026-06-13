@@ -5,8 +5,8 @@ The command-line interface is implemented in Rust using ``clap``. ``find``, the
 filesystem-backed part of ``fileinfo``, fast ``verify`` extension/signature
 checks, filesystem-backed ``folderinfo``, versioned ``manifest`` output, basic
 ``compare``, read-only ``subdivide plan``, and read-only playback planning
-surfaces are implemented. Other command behavior provides parser and help
-coverage until its development slices are completed.
+surfaces are implemented. Deeper POD5 metadata parsing and read-level POD5
+rewriting remain backend-dependent future work.
 
 Preview help:
 

@@ -4,8 +4,8 @@ Development
 Language and Packaging
 ----------------------
 
-``pod5-tools`` will be implemented in Rust. The command-line interface will use
-``clap`` and the repository will expose both a binary and a reusable library.
+``pod5-tools`` is implemented in Rust. The command-line interface uses
+``clap`` and the repository exposes both a binary and a reusable library.
 
 Rust Build and Test
 -------------------
@@ -16,10 +16,14 @@ From the repository root:
 
    cargo fmt --check
    cargo test
+   cargo clippy --all-targets -- -D warnings
    cargo run -- --help
 
-The first Rust slice establishes parser and help coverage only. Command
-behavior is implemented in later todo slices.
+The current implementation includes read-only discovery, fast verification,
+filesystem-backed metadata summaries, manifests, comparison, subdivision
+planning, whole-file subdivision materialization, and playback schedule
+inspection. Deep POD5 metadata parsing and read-level POD5 rewriting still
+depend on a future concrete POD5 reader/writer backend.
 
 Versioning
 ----------
@@ -64,10 +68,10 @@ Two implementation routes remain open for the concrete POD5 reader:
   complexity, especially for a Rust binary expected to work cleanly on local
   infrastructure without fragile Python environment assumptions.
 
-The next implementation step should prefer a small adapter spike before
-expanding command behavior. The adapter must prove that it can read flow cell
-ID, sequencing kit, read count, acquisition start, duration, version/schema
-details, and integrity state from realistic POD5 files.
+The next implementation step after release preparation should prefer a small
+adapter spike. The adapter must prove that it can read flow cell ID, sequencing
+kit, read count, acquisition start, duration, version/schema details, and
+integrity state from realistic POD5 files.
 
 Local Documentation Build
 -------------------------

@@ -3,8 +3,8 @@
 [![CI](https://github.com/sagrudd/pod5-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/sagrudd/pod5-tools/actions/workflows/ci.yml)
 [![Documentation Status](https://readthedocs.org/projects/pod5-tools/badge/?version=latest)](https://pod5-tools.readthedocs.io/en/latest/?badge=latest)
 
-`pod5-tools` is a planned Rust toolbox for auditing, discovering, describing,
-and replaying Oxford Nanopore POD5 datasets.
+`pod5-tools` is an early-stage Rust toolbox for auditing, discovering,
+describing, subdividing, and replaying Oxford Nanopore POD5 datasets.
 
 The project is sponsored by Mnemosyne Biosciences, which develops enterprise
 software for multi-tenant bioinformatics analyses on local infrastructure.
@@ -33,13 +33,13 @@ toolbox that can:
 - migrate the playback methods currently implemented in `../mnematikon` into a
   standalone, reusable project.
 
-## Planned Interface
+## Interface
 
 The project will expose both a binary and a Rust library. The binary will use
 `clap` for command-line parsing, and all versioned releases will follow semantic
 versioning.
 
-Initial command concepts:
+Implemented command examples:
 
 ```text
 pod5-tools find /path/to/search
@@ -51,7 +51,7 @@ pod5-tools playback plan --manifest playback_manifest.json --sample sample-a
 pod5-tools playback emit --manifest playback_manifest.json --sample sample-a --speedup 5x
 ```
 
-Candidate command groups:
+Command groups:
 
 - `find`: locate folders containing one or more POD5 files and report tabular
   paths, counts, and byte totals.

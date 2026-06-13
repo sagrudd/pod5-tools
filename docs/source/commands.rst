@@ -1,10 +1,10 @@
 Command Plan
 ============
 
-The command-line interface is implemented in Rust using ``clap``. ``find`` and
-the filesystem-backed part of ``fileinfo`` are implemented. Other commands,
-including ``verify``, provide parser and help coverage until their development
-slices are completed.
+The command-line interface is implemented in Rust using ``clap``. ``find``, the
+filesystem-backed part of ``fileinfo``, and fast ``verify`` extension/signature
+checks are implemented. Other command behavior provides parser and help coverage
+until its development slices are completed.
 
 Preview help:
 
@@ -94,26 +94,47 @@ Example TSV output:
 
 Verify that a candidate file is actually POD5.
 
-Preview:
+Usage:
 
 .. code-block:: sh
 
    cargo run -- verify /path/to/file.pod5
    cargo run -- verify /path/to/file.pod5 --format json
 
-Planned behavior:
+Current behavior:
 
 * check that the path exists and is a file;
 * check that the extension is ``.pod5``;
-* check the ONT POD5 fixed signature at both the beginning and end of the file;
-* check combined-file layout markers, footer magic, footer length, and padding
-  expectations where possible;
-* check that the required Reads, Signal, and Run Info tables are present;
-* check table schema metadata including POD5 version, writer software, and file
+* check the ONT POD5 fixed signature at both the beginning and end of the file.
+
+Reserved checks:
+
+* combined-file layout markers, footer magic, footer length, and padding;
+* required Reads, Signal, and Run Info table presence;
+* table schema metadata including POD5 version, writer software, and file
   identifier consistency.
 
-The command should be read-only and should distinguish extension, signature,
-layout, schema, and integrity failures in machine-readable output.
+Until a concrete POD5 parser backend is connected, reserved layout/table/schema
+checks are reported as ``not_checked``. If extension and signature checks pass
+but reserved checks remain, the overall status is ``incomplete`` rather than
+``passed``. Any implemented check failure makes the overall status ``failed``.
+
+Output fields:
+
+* path;
+* file size;
+* overall status;
+* check name;
+* check category;
+* check status;
+* detail.
+
+Example TSV output:
+
+.. code-block:: text
+
+   path	size_bytes	overall_status	check	category	status	detail
+   /data/run/pod5/reads.pod5	1048576	incomplete	leading_signature	signature	passed	leading signature matches ONT POD5 signature
 
 ``folderinfo``
 --------------

@@ -7,6 +7,7 @@
 
 use std::fmt;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -161,6 +162,56 @@ pub struct Pod5FolderInfo {
     pub acquisition_end_utc: Option<String>,
     /// Integrity status summarising all inspected files.
     pub integrity: IntegrityStatus,
+}
+
+/// Overall status from `pod5-tools verify`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyStatus {
+    /// All implemented checks passed, but some specification checks are not implemented yet.
+    Incomplete,
+    /// One or more implemented checks failed.
+    Failed,
+    /// Every required check passed.
+    Passed,
+}
+
+/// Status for an individual verification check.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyCheckStatus {
+    /// The check passed.
+    Passed,
+    /// The check failed.
+    Failed,
+    /// The check is part of the verification contract but is not implemented yet.
+    NotChecked,
+}
+
+/// One verification check result.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct VerifyCheck {
+    /// Stable check identifier for machine-readable output.
+    pub name: String,
+    /// Category used to group failures.
+    pub category: String,
+    /// Check result.
+    pub status: VerifyCheckStatus,
+    /// Human-readable check detail.
+    pub detail: String,
+}
+
+/// Verification report for one candidate POD5 file.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct Pod5VerifyReport {
+    /// Candidate file path.
+    pub path: PathBuf,
+    /// File size in bytes.
+    pub size_bytes: u64,
+    /// Overall verification status.
+    pub status: VerifyStatus,
+    /// Individual checks performed or reserved by the verification contract.
+    pub checks: Vec<VerifyCheck>,
 }
 
 /// Integrity state for a POD5 file or collection.
@@ -368,7 +419,7 @@ pub fn run(cli: Cli) -> Result<String, Pod5ToolsError> {
         Command::Fileinfo { path, format } => {
             return run_fileinfo(&FilesystemPod5MetadataReader, &path, format);
         }
-        Command::Verify { .. } => "verify",
+        Command::Verify { path, format } => return run_verify(&path, format),
         Command::Folderinfo { .. } => "folderinfo",
         Command::Playback { .. } => "playback",
         Command::Manifest { .. } => "manifest",
@@ -490,6 +541,177 @@ fn run_fileinfo(
     }
 }
 
+fn run_verify(path: &Path, format: OutputFormat) -> Result<String, Pod5ToolsError> {
+    let report = verify_pod5_file(path)?;
+    match format {
+        OutputFormat::Tsv => Ok(format_verify_report_tsv(&report)),
+        OutputFormat::Json => serde_json::to_string_pretty(&report)
+            .map_err(|error| Pod5ToolsError::new(format!("failed to serialize JSON: {error}"))),
+    }
+}
+
+const POD5_SIGNATURE: [u8; 8] = [0x8B, b'P', b'O', b'D', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// Verify that a candidate file matches implemented POD5 format checks.
+pub fn verify_pod5_file(path: &Path) -> Result<Pod5VerifyReport, Pod5ToolsError> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        Pod5ToolsError::new(format!("failed to inspect {}: {error}", path.display()))
+    })?;
+    if !metadata.is_file() {
+        return Err(Pod5ToolsError::new(format!(
+            "verify expects a file: {}",
+            path.display()
+        )));
+    }
+
+    let mut checks = Vec::new();
+    checks.push(verify_check(
+        "extension",
+        "extension",
+        if is_pod5_path(path) {
+            VerifyCheckStatus::Passed
+        } else {
+            VerifyCheckStatus::Failed
+        },
+        if is_pod5_path(path) {
+            "file extension is .pod5"
+        } else {
+            "file extension is not .pod5"
+        },
+    ));
+
+    if metadata.len() < (POD5_SIGNATURE.len() * 2) as u64 {
+        checks.push(verify_check(
+            "leading_signature",
+            "signature",
+            VerifyCheckStatus::Failed,
+            "file is too small to contain a leading POD5 signature",
+        ));
+        checks.push(verify_check(
+            "trailing_signature",
+            "signature",
+            VerifyCheckStatus::Failed,
+            "file is too small to contain a trailing POD5 signature",
+        ));
+    } else {
+        let mut file = fs::File::open(path).map_err(|error| {
+            Pod5ToolsError::new(format!("failed to open {}: {error}", path.display()))
+        })?;
+        let mut leading = [0_u8; 8];
+        file.read_exact(&mut leading).map_err(|error| {
+            Pod5ToolsError::new(format!(
+                "failed to read leading signature from {}: {error}",
+                path.display()
+            ))
+        })?;
+        checks.push(verify_check(
+            "leading_signature",
+            "signature",
+            if leading == POD5_SIGNATURE {
+                VerifyCheckStatus::Passed
+            } else {
+                VerifyCheckStatus::Failed
+            },
+            if leading == POD5_SIGNATURE {
+                "leading signature matches ONT POD5 signature"
+            } else {
+                "leading signature does not match ONT POD5 signature"
+            },
+        ));
+
+        file.seek(SeekFrom::End(-(POD5_SIGNATURE.len() as i64)))
+            .map_err(|error| {
+                Pod5ToolsError::new(format!(
+                    "failed to seek trailing signature in {}: {error}",
+                    path.display()
+                ))
+            })?;
+        let mut trailing = [0_u8; 8];
+        file.read_exact(&mut trailing).map_err(|error| {
+            Pod5ToolsError::new(format!(
+                "failed to read trailing signature from {}: {error}",
+                path.display()
+            ))
+        })?;
+        checks.push(verify_check(
+            "trailing_signature",
+            "signature",
+            if trailing == POD5_SIGNATURE {
+                VerifyCheckStatus::Passed
+            } else {
+                VerifyCheckStatus::Failed
+            },
+            if trailing == POD5_SIGNATURE {
+                "trailing signature matches ONT POD5 signature"
+            } else {
+                "trailing signature does not match ONT POD5 signature"
+            },
+        ));
+    }
+
+    checks.extend(deferred_pod5_specification_checks());
+    let status = verify_status(&checks);
+    Ok(Pod5VerifyReport {
+        path: path.to_path_buf(),
+        size_bytes: metadata.len(),
+        status,
+        checks,
+    })
+}
+
+fn verify_check(
+    name: &str,
+    category: &str,
+    status: VerifyCheckStatus,
+    detail: &str,
+) -> VerifyCheck {
+    VerifyCheck {
+        name: name.to_string(),
+        category: category.to_string(),
+        status,
+        detail: detail.to_string(),
+    }
+}
+
+fn deferred_pod5_specification_checks() -> Vec<VerifyCheck> {
+    vec![
+        verify_check(
+            "combined_file_layout",
+            "layout",
+            VerifyCheckStatus::NotChecked,
+            "combined-file layout, section markers, footer magic, footer length, and padding checks require the POD5 parser backend",
+        ),
+        verify_check(
+            "required_tables",
+            "schema",
+            VerifyCheckStatus::NotChecked,
+            "Reads, Signal, and Run Info table presence checks require the POD5 parser backend",
+        ),
+        verify_check(
+            "schema_metadata",
+            "schema",
+            VerifyCheckStatus::NotChecked,
+            "POD5 version, writer software, and file identifier consistency checks require the POD5 parser backend",
+        ),
+    ]
+}
+
+fn verify_status(checks: &[VerifyCheck]) -> VerifyStatus {
+    if checks
+        .iter()
+        .any(|check| check.status == VerifyCheckStatus::Failed)
+    {
+        VerifyStatus::Failed
+    } else if checks
+        .iter()
+        .any(|check| check.status == VerifyCheckStatus::NotChecked)
+    {
+        VerifyStatus::Incomplete
+    } else {
+        VerifyStatus::Passed
+    }
+}
+
 /// Format POD5 directory records as tab-separated text.
 pub fn format_directory_records_tsv(records: &[Pod5DirectoryRecord]) -> String {
     let mut output = String::from(
@@ -537,6 +759,42 @@ fn integrity_tsv_fields(integrity: &IntegrityStatus) -> (&'static str, &str) {
         IntegrityStatus::Failed { reason } => ("failed", reason),
         IntegrityStatus::NotChecked => ("not_checked", ""),
         IntegrityStatus::Unavailable { reason } => ("unavailable", reason),
+    }
+}
+
+/// Format a POD5 verification report as tab-separated text.
+pub fn format_verify_report_tsv(report: &Pod5VerifyReport) -> String {
+    let mut output =
+        String::from("path\tsize_bytes\toverall_status\tcheck\tcategory\tstatus\tdetail");
+    for check in &report.checks {
+        output.push('\n');
+        output.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            report.path.display(),
+            report.size_bytes,
+            verify_status_label(&report.status),
+            check.name,
+            check.category,
+            verify_check_status_label(&check.status),
+            check.detail,
+        ));
+    }
+    output
+}
+
+fn verify_status_label(status: &VerifyStatus) -> &'static str {
+    match status {
+        VerifyStatus::Incomplete => "incomplete",
+        VerifyStatus::Failed => "failed",
+        VerifyStatus::Passed => "passed",
+    }
+}
+
+fn verify_check_status_label(status: &VerifyCheckStatus) -> &'static str {
+    match status {
+        VerifyCheckStatus::Passed => "passed",
+        VerifyCheckStatus::Failed => "failed",
+        VerifyCheckStatus::NotChecked => "not_checked",
     }
 }
 
@@ -765,6 +1023,117 @@ mod tests {
         assert!(output.contains("\"size_bytes\": 4"));
         assert!(output.contains("\"flow_cell_id\": null"));
         assert!(output.contains("\"Unavailable\""));
+    }
+
+    fn write_signature_fixture(path: &Path) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&POD5_SIGNATURE);
+        bytes.extend_from_slice(&[0_u8; 16]);
+        bytes.extend_from_slice(&POD5_SIGNATURE);
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn verify_reports_incomplete_for_signature_valid_candidate() {
+        let root = tempfile::tempdir().unwrap();
+        let pod5 = root.path().join("reads.pod5");
+        write_signature_fixture(&pod5);
+
+        let report = verify_pod5_file(&pod5).unwrap();
+
+        assert_eq!(report.status, VerifyStatus::Incomplete);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "leading_signature" && check.status == VerifyCheckStatus::Passed
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "trailing_signature" && check.status == VerifyCheckStatus::Passed
+        }));
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.status == VerifyCheckStatus::NotChecked)
+        );
+    }
+
+    #[test]
+    fn verify_reports_extension_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("reads.bin");
+        write_signature_fixture(&path);
+
+        let report = verify_pod5_file(&path).unwrap();
+
+        assert_eq!(report.status, VerifyStatus::Failed);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "extension" && check.status == VerifyCheckStatus::Failed
+        }));
+    }
+
+    #[test]
+    fn verify_reports_truncated_file() {
+        let root = tempfile::tempdir().unwrap();
+        let pod5 = root.path().join("reads.pod5");
+        fs::write(&pod5, &POD5_SIGNATURE[..4]).unwrap();
+
+        let report = verify_pod5_file(&pod5).unwrap();
+
+        assert_eq!(report.status, VerifyStatus::Failed);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "leading_signature" && check.status == VerifyCheckStatus::Failed
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "trailing_signature" && check.status == VerifyCheckStatus::Failed
+        }));
+    }
+
+    #[test]
+    fn verify_reports_signature_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let pod5 = root.path().join("reads.pod5");
+        fs::write(&pod5, b"not-pod5-but-long-enough").unwrap();
+
+        let report = verify_pod5_file(&pod5).unwrap();
+
+        assert_eq!(report.status, VerifyStatus::Failed);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "leading_signature" && check.status == VerifyCheckStatus::Failed
+        }));
+    }
+
+    #[test]
+    fn run_verify_emits_tsv_by_default() {
+        let root = tempfile::tempdir().unwrap();
+        let pod5 = root.path().join("reads.pod5");
+        write_signature_fixture(&pod5);
+
+        let cli = Cli::try_parse_from(["pod5-tools", "verify", pod5.to_str().unwrap()]).unwrap();
+        let output = run(cli).unwrap();
+
+        assert!(output.starts_with("path\tsize_bytes\toverall_status"));
+        assert!(output.contains("\tincomplete\tleading_signature\tsignature\tpassed\t"));
+        assert!(output.contains("\tnot_checked\t"));
+    }
+
+    #[test]
+    fn run_verify_emits_json_when_requested() {
+        let root = tempfile::tempdir().unwrap();
+        let pod5 = root.path().join("reads.pod5");
+        write_signature_fixture(&pod5);
+
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "verify",
+            pod5.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        let output = run(cli).unwrap();
+
+        assert!(output.contains("\"status\": \"incomplete\""));
+        assert!(output.contains("\"name\": \"leading_signature\""));
+        assert!(output.contains("\"status\": \"not_checked\""));
     }
 
     #[derive(Debug)]

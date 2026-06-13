@@ -58,17 +58,17 @@ buildable or documentable, tested where applicable, committed, and pushed.
 
 ## Slice 7: `verify`
 
-- [ ] Add a `verify` subcommand to the CLI contract.
-- [ ] Check the input path exists, is a file, and has a `.pod5` extension.
-- [ ] Add fast content checks for the fixed ONT POD5 signature at the start and
+- [x] Add a `verify` subcommand to the CLI contract.
+- [x] Check the input path exists, is a file, and has a `.pod5` extension.
+- [x] Add fast content checks for the fixed ONT POD5 signature at the start and
   end of the file.
-- [ ] Define deeper specification checks for combined-file layout, footer magic,
+- [x] Define deeper specification checks for combined-file layout, footer magic,
   footer length, required Reads/Signal/Run Info tables, and required schema
   metadata.
-- [ ] Emit TSV by default and JSON with an explicit option.
-- [ ] Add tests for extension, signature, truncated-file, and success/failure
+- [x] Emit TSV by default and JSON with an explicit option.
+- [x] Add tests for extension, signature, truncated-file, and success/failure
   reporting paths.
-- [ ] Document how `verify` maps failures to ONT POD5 specification concepts.
+- [x] Document how `verify` maps failures to ONT POD5 specification concepts.
 
 ## Slice 8: `folderinfo`
 

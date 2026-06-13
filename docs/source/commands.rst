@@ -4,8 +4,8 @@ Command Plan
 The command-line interface is implemented in Rust using ``clap``. ``find``, the
 filesystem-backed part of ``fileinfo``, fast ``verify`` extension/signature
 checks, filesystem-backed ``folderinfo``, versioned ``manifest`` output, basic
-``compare``, read-only ``subdivide plan``, and the first playback library
-contracts are implemented. Other command behavior provides parser and help
+``compare``, read-only ``subdivide plan``, and read-only playback planning
+surfaces are implemented. Other command behavior provides parser and help
 coverage until its development slices are completed.
 
 Preview help:
@@ -325,18 +325,21 @@ Replay an existing POD5 collection in sequencing-like order. This behavior will
 be migrated from the Mnematikon implementation into standalone library and CLI
 contracts.
 
-Preview:
+Usage:
 
 .. code-block:: sh
 
-   cargo run -- playback --input /path/to/source --out /path/to/playback
+   cargo run -- playback plan --manifest playback_manifest.json --sample sample-a
+   cargo run -- playback plan --manifest a.json --sample sample-a --manifest b.json --sample sample-b
+   cargo run -- playback emit --manifest playback_manifest.json --sample sample-a --speedup 5x
+   cargo run -- playback plan --manifest playback_manifest.json --sample sample-a --format json --output plan.json
 
 Current behavior:
 
-* the command-line surface remains a preview while ``playback plan`` and
-  ``playback emit`` are separated into standalone operations;
-* library contracts now exist for playback manifests, batch schedules, sample
-  plans, elapsed-time cutoffs, speedup parsing, and wait calculations;
+* ``playback plan`` loads one or more playback manifest JSON files and reports
+  their per-sample batches plus the merged sequencing-time schedule;
+* ``playback emit`` reports a deterministic dry-run emission order and the
+  wall-clock waits implied by ``--speedup``;
 * migrated planning helpers are independent of Mnematikon API sessions,
   flowcell adoption, biosample creation, and upload behavior.
 
@@ -351,6 +354,35 @@ Compatibility notes:
 * batch emission time is calculated as ``bucket_start_seconds +
   tempo_seconds`` and schedules are merged across sample streams.
 
-The next playback slice should expose these library contracts through
-``playback plan`` and ``playback emit`` without reintroducing Mnematikon-specific
-API/session assumptions.
+``playback plan`` TSV fields:
+
+* sample label;
+* input path, inferred from the manifest path unless ``--input`` is provided;
+* manifest path;
+* merged schedule seconds;
+* batch index;
+* batch path;
+* bucket start seconds;
+* emit seconds;
+* read count;
+* source POD5 count;
+* minimum and maximum elapsed seconds when available.
+
+``playback emit`` TSV fields:
+
+* speedup;
+* emission round index;
+* sample label;
+* batch index;
+* batch path;
+* emit seconds;
+* source sequencing wait seconds;
+* wall-clock wait seconds;
+* read count.
+
+Example dry-run TSV output:
+
+.. code-block:: text
+
+   speedup	round_index	sample	batch_index	batch_path	emit_seconds	sequence_wait_seconds	wall_wait_seconds	read_count
+   5x	1	sample-a	1	/playback/a/batch-001.pod5	90	90	18	1

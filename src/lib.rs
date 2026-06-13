@@ -62,12 +62,9 @@ pub enum Command {
     },
     /// Create or emit a sequencing-like playback plan from existing data.
     Playback {
-        /// Source POD5 folder or manifest.
-        #[arg(long)]
-        input: PathBuf,
-        /// Output directory for generated playback artefacts.
-        #[arg(long)]
-        out: PathBuf,
+        /// Playback action to run.
+        #[command(subcommand)]
+        command: PlaybackCommand,
     },
     /// Write a stable manifest for a POD5 collection.
     Manifest {
@@ -92,6 +89,47 @@ pub enum Command {
         left: PathBuf,
         /// Right-hand collection or manifest.
         right: PathBuf,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Tsv)]
+        format: OutputFormat,
+    },
+}
+
+/// Supported playback actions.
+#[derive(Debug, Subcommand)]
+pub enum PlaybackCommand {
+    /// Inspect playback manifests and report a merged schedule.
+    Plan {
+        /// Playback manifest JSON file. Repeat for multiple sample streams.
+        #[arg(long, required = true)]
+        manifest: Vec<PathBuf>,
+        /// Sample label. Repeat once per manifest.
+        #[arg(long, required = true)]
+        sample: Vec<String>,
+        /// Original input path. Repeat once per manifest, or omit to infer from the manifest path.
+        #[arg(long)]
+        input: Vec<PathBuf>,
+        /// Optional output path. Standard output is used when omitted.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Tsv)]
+        format: OutputFormat,
+    },
+    /// Report the batch emission order and wall-clock waits for a playback schedule.
+    Emit {
+        /// Playback manifest JSON file. Repeat for multiple sample streams.
+        #[arg(long, required = true)]
+        manifest: Vec<PathBuf>,
+        /// Sample label. Repeat once per manifest.
+        #[arg(long, required = true)]
+        sample: Vec<String>,
+        /// Original input path. Repeat once per manifest, or omit to infer from the manifest path.
+        #[arg(long)]
+        input: Vec<PathBuf>,
+        /// Accelerate wall-clock playback while preserving source sequencing timestamps.
+        #[arg(long, default_value = "1x")]
+        speedup: String,
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Tsv)]
         format: OutputFormat,
@@ -431,6 +469,47 @@ pub struct PlaybackSamplePlan {
     pub manifest: PlaybackManifest,
 }
 
+/// Report returned by `playback plan`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackPlanReport {
+    /// Sample plans loaded from playback manifests.
+    pub sample_plans: Vec<PlaybackSamplePlan>,
+    /// Merged source sequencing seconds at which at least one batch is emitted.
+    pub schedule_seconds: Vec<f64>,
+}
+
+/// Report returned by `playback emit`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackEmitReport {
+    /// Numeric wall-clock speedup factor.
+    pub speedup: f64,
+    /// Human-readable speedup label.
+    pub speedup_label: String,
+    /// Ordered batch emission events.
+    pub events: Vec<PlaybackEmitEvent>,
+}
+
+/// One dry-run playback emission event.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackEmitEvent {
+    /// 1-based emission round index from the merged schedule.
+    pub round_index: u64,
+    /// Sample or stream label.
+    pub sample: String,
+    /// Batch file to emit.
+    pub batch_path: PathBuf,
+    /// Stable 1-based batch index.
+    pub batch_index: u64,
+    /// Source sequencing second at which this batch is emitted.
+    pub emit_seconds: f64,
+    /// Source sequencing seconds since the previous emitted bucket.
+    pub sequence_wait_seconds: f64,
+    /// Wall-clock seconds to wait after applying speedup.
+    pub wall_wait_seconds: f64,
+    /// Number of reads contained in the batch.
+    pub read_count: u64,
+}
+
 /// Playback cutoff for source sequencing time.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PlaybackCutoff {
@@ -644,25 +723,36 @@ impl From<Pod5ReaderError> for Pod5ToolsError {
     }
 }
 
-/// Dispatch a parsed command.
-///
-/// Current subcommands are stubs: they parse arguments and return a stable
-/// "not yet implemented" message while command behavior is built in later
-/// development slices.
+/// Dispatch a parsed command and return rendered command output.
 pub fn run(cli: Cli) -> Result<String, Pod5ToolsError> {
-    let command = match cli.command {
-        Command::Find { path, format } => return run_find(path, format),
+    match cli.command {
+        Command::Find { path, format } => run_find(path, format),
         Command::Fileinfo { path, format } => {
-            return run_fileinfo(&FilesystemPod5MetadataReader, &path, format);
+            run_fileinfo(&FilesystemPod5MetadataReader, &path, format)
         }
-        Command::Verify { path, format } => return run_verify(&path, format),
-        Command::Folderinfo { path, format } => return run_folderinfo(&path, format),
-        Command::Playback { .. } => "playback",
+        Command::Verify { path, format } => run_verify(&path, format),
+        Command::Folderinfo { path, format } => run_folderinfo(&path, format),
+        Command::Playback { command } => match command {
+            PlaybackCommand::Plan {
+                manifest,
+                sample,
+                input,
+                output,
+                format,
+            } => run_playback_plan(&manifest, &sample, &input, output.as_deref(), format),
+            PlaybackCommand::Emit {
+                manifest,
+                sample,
+                input,
+                speedup,
+                format,
+            } => run_playback_emit(&manifest, &sample, &input, &speedup, format),
+        },
         Command::Manifest {
             path,
             output,
             format,
-        } => return run_manifest(&path, output.as_deref(), format),
+        } => run_manifest(&path, output.as_deref(), format),
         Command::Subdivide { command } => match command {
             SubdivideCommand::Plan {
                 path,
@@ -672,27 +762,22 @@ pub fn run(cli: Cli) -> Result<String, Pod5ToolsError> {
                 reads_per_chunk,
                 output,
                 format,
-            } => {
-                return run_subdivide_plan(
-                    &path,
-                    strategy,
-                    files_per_chunk,
-                    seconds_per_chunk,
-                    reads_per_chunk,
-                    output.as_deref(),
-                    format,
-                );
-            }
+            } => run_subdivide_plan(
+                &path,
+                strategy,
+                files_per_chunk,
+                seconds_per_chunk,
+                reads_per_chunk,
+                output.as_deref(),
+                format,
+            ),
         },
         Command::Compare {
             left,
             right,
             format,
-        } => return run_compare(&left, &right, format),
-    };
-    Ok(format!(
-        "pod5-tools {command} is not implemented yet; see todo.md for the development plan"
-    ))
+        } => run_compare(&left, &right, format),
+    }
 }
 
 /// Recursively find directories that contain POD5 files.
@@ -881,6 +966,45 @@ fn run_subdivide_plan(
         Ok(format!("wrote subdivide plan to {}", output.display()))
     } else {
         Ok(rendered)
+    }
+}
+
+fn run_playback_plan(
+    manifest_paths: &[PathBuf],
+    samples: &[String],
+    inputs: &[PathBuf],
+    output: Option<&Path>,
+    format: OutputFormat,
+) -> Result<String, Pod5ToolsError> {
+    let report = playback_plan_report(manifest_paths, samples, inputs)?;
+    let rendered = match format {
+        OutputFormat::Tsv => format_playback_plan_tsv(&report),
+        OutputFormat::Json => serde_json::to_string_pretty(&report)
+            .map_err(|error| Pod5ToolsError::new(format!("failed to serialize JSON: {error}")))?,
+    };
+    if let Some(output) = output {
+        fs::write(output, rendered).map_err(|error| {
+            Pod5ToolsError::new(format!("failed to write {}: {error}", output.display()))
+        })?;
+        Ok(format!("wrote playback plan to {}", output.display()))
+    } else {
+        Ok(rendered)
+    }
+}
+
+fn run_playback_emit(
+    manifest_paths: &[PathBuf],
+    samples: &[String],
+    inputs: &[PathBuf],
+    speedup: &str,
+    format: OutputFormat,
+) -> Result<String, Pod5ToolsError> {
+    let plans = playback_sample_plans(manifest_paths, samples, inputs)?;
+    let report = playback_emit_report(&plans, parse_playback_speedup(speedup)?)?;
+    match format {
+        OutputFormat::Tsv => Ok(format_playback_emit_tsv(&report)),
+        OutputFormat::Json => serde_json::to_string_pretty(&report)
+            .map_err(|error| Pod5ToolsError::new(format!("failed to serialize JSON: {error}"))),
     }
 }
 
@@ -1711,6 +1835,91 @@ fn subdivide_strategy_label(strategy: &SubdivideStrategy) -> &'static str {
     }
 }
 
+/// Format a playback plan report as tab-separated text.
+pub fn format_playback_plan_tsv(report: &PlaybackPlanReport) -> String {
+    let mut output = String::from(
+        "sample\tinput\tmanifest_path\tschedule_seconds\tbatch_index\tbatch_path\tbucket_start_seconds\temit_seconds\tread_count\tsource_pod5_count\tmin_elapsed_seconds\tmax_elapsed_seconds",
+    );
+    let schedule_seconds = report
+        .schedule_seconds
+        .iter()
+        .map(|seconds| format_float(*seconds))
+        .collect::<Vec<_>>()
+        .join(",");
+    for plan in &report.sample_plans {
+        if plan.manifest.batches.is_empty() {
+            output.push('\n');
+            output.push_str(&format!(
+                "{}\t{}\t{}\t{}\t\t\t\t\t0\t{}\t\t",
+                plan.sample,
+                plan.input.display(),
+                plan.manifest_path.display(),
+                schedule_seconds,
+                plan.manifest.source_pod5_count,
+            ));
+        }
+        for batch in &plan.manifest.batches {
+            output.push('\n');
+            output.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                plan.sample,
+                plan.input.display(),
+                plan.manifest_path.display(),
+                schedule_seconds,
+                batch.batch_index,
+                batch.path.display(),
+                format_float(batch.bucket_start_seconds),
+                format_float(playback_batch_emit_seconds(&plan.manifest, batch)),
+                batch.read_count,
+                batch.source_pod5_count,
+                batch
+                    .min_elapsed_seconds
+                    .map(format_float)
+                    .unwrap_or_default(),
+                batch
+                    .max_elapsed_seconds
+                    .map(format_float)
+                    .unwrap_or_default(),
+            ));
+        }
+    }
+    output
+}
+
+/// Format a dry-run playback emission report as tab-separated text.
+pub fn format_playback_emit_tsv(report: &PlaybackEmitReport) -> String {
+    let mut output = String::from(
+        "speedup\tround_index\tsample\tbatch_index\tbatch_path\temit_seconds\tsequence_wait_seconds\twall_wait_seconds\tread_count",
+    );
+    for event in &report.events {
+        output.push('\n');
+        output.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            report.speedup_label,
+            event.round_index,
+            event.sample,
+            event.batch_index,
+            event.batch_path.display(),
+            format_float(event.emit_seconds),
+            format_float(event.sequence_wait_seconds),
+            format_float(event.wall_wait_seconds),
+            event.read_count,
+        ));
+    }
+    output
+}
+
+fn format_float(value: f64) -> String {
+    if (value.fract()).abs() < f64::EPSILON {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.6}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    }
+}
+
 /// Load a playback manifest JSON file.
 pub fn load_playback_manifest(path: &Path) -> Result<PlaybackManifest, Pod5ToolsError> {
     let content = fs::read_to_string(path).map_err(|error| {
@@ -1721,6 +1930,123 @@ pub fn load_playback_manifest(path: &Path) -> Result<PlaybackManifest, Pod5Tools
             "failed to parse playback manifest {}: {error}",
             path.display()
         ))
+    })
+}
+
+/// Build a playback plan report from playback manifest JSON files.
+pub fn playback_plan_report(
+    manifest_paths: &[PathBuf],
+    samples: &[String],
+    inputs: &[PathBuf],
+) -> Result<PlaybackPlanReport, Pod5ToolsError> {
+    let sample_plans = playback_sample_plans(manifest_paths, samples, inputs)?;
+    let schedule_seconds = playback_schedule(&sample_plans);
+    Ok(PlaybackPlanReport {
+        sample_plans,
+        schedule_seconds,
+    })
+}
+
+/// Load playback sample plans from manifest paths and user-provided labels.
+pub fn playback_sample_plans(
+    manifest_paths: &[PathBuf],
+    samples: &[String],
+    inputs: &[PathBuf],
+) -> Result<Vec<PlaybackSamplePlan>, Pod5ToolsError> {
+    if manifest_paths.is_empty() {
+        return Err(Pod5ToolsError::new(
+            "playback requires at least one --manifest",
+        ));
+    }
+    if manifest_paths.len() != samples.len() {
+        return Err(Pod5ToolsError::new(format!(
+            "playback requires the same number of --manifest and --sample values; received {} manifest(s) and {} sample(s)",
+            manifest_paths.len(),
+            samples.len()
+        )));
+    }
+    if !inputs.is_empty() && inputs.len() != manifest_paths.len() {
+        return Err(Pod5ToolsError::new(format!(
+            "playback requires either zero --input values or one per --manifest; received {} manifest(s) and {} input(s)",
+            manifest_paths.len(),
+            inputs.len()
+        )));
+    }
+
+    let mut seen = BTreeSet::new();
+    manifest_paths
+        .iter()
+        .enumerate()
+        .map(|(index, manifest_path)| {
+            let sample = samples[index].trim();
+            if sample.is_empty() {
+                return Err(Pod5ToolsError::new("sample label is required"));
+            }
+            if !seen.insert(sample.to_string()) {
+                return Err(Pod5ToolsError::new(format!(
+                    "sample label '{sample}' was provided more than once"
+                )));
+            }
+            let input = inputs
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| inferred_playback_input_path(manifest_path));
+            Ok(PlaybackSamplePlan {
+                sample: sample.to_string(),
+                input,
+                manifest_path: manifest_path.clone(),
+                manifest: load_playback_manifest(manifest_path)?,
+            })
+        })
+        .collect()
+}
+
+fn inferred_playback_input_path(manifest_path: &Path) -> PathBuf {
+    manifest_path
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Build a dry-run playback emission report from sample plans.
+pub fn playback_emit_report(
+    plans: &[PlaybackSamplePlan],
+    speedup: f64,
+) -> Result<PlaybackEmitReport, Pod5ToolsError> {
+    if !speedup.is_finite() || speedup <= 0.0 {
+        return Err(Pod5ToolsError::new(
+            "playback speedup must be finite and greater than zero",
+        ));
+    }
+    let schedule = playback_schedule(plans);
+    let mut previous_bucket = Some(0.0);
+    let mut events = Vec::new();
+    for (round_index, bucket) in schedule.iter().enumerate() {
+        let sequence_wait_seconds = playback_sequence_wait_seconds(previous_bucket, *bucket);
+        let wall_wait_seconds = playback_wall_wait_seconds(sequence_wait_seconds, speedup);
+        previous_bucket = Some(*bucket);
+        for plan in plans {
+            for batch in &plan.manifest.batches {
+                let emit_seconds = playback_batch_emit_seconds(&plan.manifest, batch);
+                if playback_bucket_key(emit_seconds) == playback_bucket_key(*bucket) {
+                    events.push(PlaybackEmitEvent {
+                        round_index: round_index as u64 + 1,
+                        sample: plan.sample.clone(),
+                        batch_path: batch.path.clone(),
+                        batch_index: batch.batch_index,
+                        emit_seconds,
+                        sequence_wait_seconds,
+                        wall_wait_seconds,
+                        read_count: batch.read_count,
+                    });
+                }
+            }
+        }
+    }
+    Ok(PlaybackEmitReport {
+        speedup,
+        speedup_label: playback_speedup_label(speedup),
+        events,
     })
 }
 
@@ -1909,21 +2235,70 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_playback_io_paths() {
+    fn cli_parses_playback_plan_options() {
         let cli = Cli::try_parse_from([
             "pod5-tools",
             "playback",
-            "--input",
-            "/data/source",
-            "--out",
-            "/tmp/playback",
+            "plan",
+            "--manifest",
+            "/tmp/playback_manifest.json",
+            "--sample",
+            "sample-a",
+            "--format",
+            "json",
         ])
         .unwrap();
-        let Command::Playback { input, out } = cli.command else {
+        let Command::Playback { command } = cli.command else {
             panic!("expected playback command");
         };
-        assert_eq!(input, PathBuf::from("/data/source"));
-        assert_eq!(out, PathBuf::from("/tmp/playback"));
+        let PlaybackCommand::Plan {
+            manifest,
+            sample,
+            format,
+            ..
+        } = command
+        else {
+            panic!("expected playback plan command");
+        };
+        assert_eq!(manifest, vec![PathBuf::from("/tmp/playback_manifest.json")]);
+        assert_eq!(sample, vec!["sample-a".to_string()]);
+        assert_eq!(format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn cli_parses_playback_emit_speedup() {
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "playback",
+            "emit",
+            "--manifest",
+            "/tmp/playback_manifest.json",
+            "--sample",
+            "sample-a",
+            "--input",
+            "/data/source",
+            "--speedup",
+            "5x",
+        ])
+        .unwrap();
+        let Command::Playback { command } = cli.command else {
+            panic!("expected playback command");
+        };
+        let PlaybackCommand::Emit {
+            manifest,
+            sample,
+            input,
+            speedup,
+            format,
+        } = command
+        else {
+            panic!("expected playback emit command");
+        };
+        assert_eq!(manifest, vec![PathBuf::from("/tmp/playback_manifest.json")]);
+        assert_eq!(sample, vec!["sample-a".to_string()]);
+        assert_eq!(input, vec![PathBuf::from("/data/source")]);
+        assert_eq!(speedup, "5x");
+        assert_eq!(format, OutputFormat::Tsv);
     }
 
     #[test]
@@ -2591,6 +2966,46 @@ mod tests {
         assert_eq!(plan.chunks[0].file_count, 1);
     }
 
+    fn playback_manifest_fixture(path: &Path, batch_path_prefix: &str, buckets: &[f64]) {
+        let batches = buckets
+            .iter()
+            .enumerate()
+            .map(|(index, bucket)| {
+                format!(
+                    r#"{{
+                  "path": "{batch_path_prefix}/batch-{batch_index:03}.pod5",
+                  "batch_index": {batch_index},
+                  "read_count": 1,
+                  "source_pod5_count": 1,
+                  "source_pod5_files": ["{batch_path_prefix}/source.pod5"],
+                  "bucket_start_seconds": {bucket},
+                  "min_elapsed_seconds": {bucket},
+                  "max_elapsed_seconds": {max_elapsed}
+                }}"#,
+                    batch_index = index + 1,
+                    max_elapsed = bucket + 1.0,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        fs::write(
+            path,
+            format!(
+                r#"{{
+              "read_count": {},
+              "source_pod5_count": 1,
+              "source_pod5_files": ["{batch_path_prefix}/source.pod5"],
+              "tempo_seconds": 90.0,
+              "cutoff_seconds": 180.0,
+              "master_table": "{batch_path_prefix}/master.tsv",
+              "batches": [{batches}]
+            }}"#,
+                buckets.len()
+            ),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn playback_schedule_merges_temporal_buckets_across_samples() {
         let plans = vec![
@@ -2714,39 +3129,112 @@ mod tests {
     fn playback_manifest_loads_from_json() {
         let root = tempfile::tempdir().unwrap();
         let manifest_path = root.path().join("playback_manifest.json");
-        fs::write(
-            &manifest_path,
-            r#"{
-              "read_count": 2,
-              "source_pod5_count": 1,
-              "source_pod5_files": ["/source/reads.pod5"],
-              "tempo_seconds": 90.0,
-              "cutoff_seconds": 180.0,
-              "master_table": "/playback/master.tsv",
-              "batches": [
-                {
-                  "path": "/playback/batch-001.pod5",
-                  "batch_index": 1,
-                  "read_count": 2,
-                  "source_pod5_count": 1,
-                  "source_pod5_files": ["/source/reads.pod5"],
-                  "bucket_start_seconds": 0.0,
-                  "min_elapsed_seconds": 0.0,
-                  "max_elapsed_seconds": 12.5
-                }
-              ]
-            }"#,
-        )
-        .unwrap();
+        playback_manifest_fixture(&manifest_path, "/playback", &[0.0]);
 
         let manifest = load_playback_manifest(&manifest_path).unwrap();
 
-        assert_eq!(manifest.read_count, 2);
+        assert_eq!(manifest.read_count, 1);
         assert_eq!(manifest.batches.len(), 1);
         assert_eq!(
             manifest.batches[0].path,
             PathBuf::from("/playback/batch-001.pod5")
         );
+    }
+
+    #[test]
+    fn playback_plan_report_loads_multiple_manifests() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first.json");
+        let second = root.path().join("second.json");
+        playback_manifest_fixture(&first, "/playback/a", &[0.0, 180.0]);
+        playback_manifest_fixture(&second, "/playback/b", &[90.0]);
+
+        let report = playback_plan_report(
+            &[first.clone(), second.clone()],
+            &["sample-a".to_string(), "sample-b".to_string()],
+            &[],
+        )
+        .unwrap();
+        let output = format_playback_plan_tsv(&report);
+
+        assert_eq!(report.schedule_seconds, vec![90.0, 180.0, 270.0]);
+        assert!(output.starts_with("sample\tinput\tmanifest_path"));
+        assert!(output.contains("sample-a"));
+        assert!(output.contains("90,180,270"));
+    }
+
+    #[test]
+    fn run_playback_plan_writes_json_output_file() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("playback_manifest.json");
+        let output_path = root.path().join("plan.json");
+        playback_manifest_fixture(&manifest, "/playback/a", &[0.0]);
+
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "playback",
+            "plan",
+            "--manifest",
+            manifest.to_str().unwrap(),
+            "--sample",
+            "sample-a",
+            "--format",
+            "json",
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .unwrap();
+        let message = run(cli).unwrap();
+        let report: PlaybackPlanReport =
+            serde_json::from_str(&fs::read_to_string(&output_path).unwrap()).unwrap();
+
+        assert!(message.contains("wrote playback plan"));
+        assert_eq!(report.sample_plans.len(), 1);
+        assert_eq!(report.schedule_seconds, vec![90.0]);
+    }
+
+    #[test]
+    fn playback_emit_report_calculates_wall_clock_waits() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("playback_manifest.json");
+        playback_manifest_fixture(&manifest, "/playback/a", &[0.0, 180.0]);
+        let plans = playback_sample_plans(&[manifest], &["sample-a".to_string()], &[]).unwrap();
+
+        let report = playback_emit_report(&plans, 5.0).unwrap();
+        let output = format_playback_emit_tsv(&report);
+
+        assert_eq!(report.speedup_label, "5x");
+        assert_eq!(report.events.len(), 2);
+        assert_eq!(report.events[0].emit_seconds, 90.0);
+        assert_eq!(report.events[0].wall_wait_seconds, 18.0);
+        assert_eq!(report.events[1].sequence_wait_seconds, 180.0);
+        assert!(output.contains("5x\t1\tsample-a\t1\t/playback/a/batch-001.pod5\t90\t90\t18\t1"));
+    }
+
+    #[test]
+    fn run_playback_emit_emits_json_when_requested() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("playback_manifest.json");
+        playback_manifest_fixture(&manifest, "/playback/a", &[0.0]);
+
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "playback",
+            "emit",
+            "--manifest",
+            manifest.to_str().unwrap(),
+            "--sample",
+            "sample-a",
+            "--speedup",
+            "2x",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        let output = run(cli).unwrap();
+
+        assert!(output.contains("\"speedup_label\": \"2x\""));
+        assert!(output.contains("\"wall_wait_seconds\": 45.0"));
     }
 
     #[test]

@@ -2,8 +2,9 @@ Command Plan
 ============
 
 The command-line interface is implemented in Rust using ``clap``. ``find`` and
-the filesystem-backed part of ``fileinfo`` are implemented. Other commands
-provide parser and help coverage until their development slices are completed.
+the filesystem-backed part of ``fileinfo`` are implemented. Other commands,
+including ``verify``, provide parser and help coverage until their development
+slices are completed.
 
 Preview help:
 
@@ -87,6 +88,32 @@ Example TSV output:
 
    path	size_bytes	flow_cell_id	sequencing_kit	read_count	acquisition_start_utc	duration_seconds	pod5_version	integrity_status	integrity_reason
    /data/run/pod5/reads.pod5	1048576								unavailable	POD5 parser backend not configured; only filesystem metadata was inspected
+
+``verify``
+----------
+
+Verify that a candidate file is actually POD5.
+
+Preview:
+
+.. code-block:: sh
+
+   cargo run -- verify /path/to/file.pod5
+   cargo run -- verify /path/to/file.pod5 --format json
+
+Planned behavior:
+
+* check that the path exists and is a file;
+* check that the extension is ``.pod5``;
+* check the ONT POD5 fixed signature at both the beginning and end of the file;
+* check combined-file layout markers, footer magic, footer length, and padding
+  expectations where possible;
+* check that the required Reads, Signal, and Run Info tables are present;
+* check table schema metadata including POD5 version, writer software, and file
+  identifier consistency.
+
+The command should be read-only and should distinguish extension, signature,
+layout, schema, and integrity failures in machine-readable output.
 
 ``folderinfo``
 --------------

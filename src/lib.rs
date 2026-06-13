@@ -42,6 +42,14 @@ pub enum Command {
         #[arg(long, value_enum, default_value_t = OutputFormat::Tsv)]
         format: OutputFormat,
     },
+    /// Verify that one file is specification-adherent POD5.
+    Verify {
+        /// POD5 file to verify.
+        path: PathBuf,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Tsv)]
+        format: OutputFormat,
+    },
     /// Summarise a folder or run tree containing POD5 files.
     Folderinfo {
         /// Folder to inspect.
@@ -360,6 +368,7 @@ pub fn run(cli: Cli) -> Result<String, Pod5ToolsError> {
         Command::Fileinfo { path, format } => {
             return run_fileinfo(&FilesystemPod5MetadataReader, &path, format);
         }
+        Command::Verify { .. } => "verify",
         Command::Folderinfo { .. } => "folderinfo",
         Command::Playback { .. } => "playback",
         Command::Manifest { .. } => "manifest",
@@ -558,6 +567,23 @@ mod tests {
         .unwrap();
         let Command::Fileinfo { path, format } = cli.command else {
             panic!("expected fileinfo command");
+        };
+        assert_eq!(path, PathBuf::from("/data/reads.pod5"));
+        assert_eq!(format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn cli_parses_verify_with_json_output() {
+        let cli = Cli::try_parse_from([
+            "pod5-tools",
+            "verify",
+            "/data/reads.pod5",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        let Command::Verify { path, format } = cli.command else {
+            panic!("expected verify command");
         };
         assert_eq!(path, PathBuf::from("/data/reads.pod5"));
         assert_eq!(format, OutputFormat::Json);

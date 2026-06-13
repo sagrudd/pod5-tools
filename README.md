@@ -44,6 +44,7 @@ Initial command concepts:
 ```text
 pod5-tools find /path/to/search
 pod5-tools fileinfo /path/to/file.pod5
+pod5-tools verify /path/to/file.pod5
 pod5-tools folderinfo /path/to/folder
 pod5-tools playback --input /path/to/pod5 --out /path/to/playback
 ```
@@ -55,6 +56,10 @@ Candidate command groups:
 - `fileinfo`: report QC and provenance information for a single POD5 file,
   including flow cell ID, sequencing kit, read count, acquisition start time,
   signal duration, file size, schema/version information, and integrity status.
+- `verify`: quickly confirm that a candidate file is actually POD5 by checking
+  the extension and then validating content against the ONT POD5
+  specification, including signature, layout, table, schema, and metadata
+  expectations.
 - `folderinfo`: aggregate `fileinfo`-style metrics across a directory tree,
   detecting mixed flow cells, interrupted runs, duplicated file names, and
   unexpected gaps in acquisition time.

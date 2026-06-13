@@ -35,8 +35,8 @@ Deliverables:
 - `Cargo.toml` with semantic version `0.1.0`.
 - Library crate for shared types and command planning.
 - Binary crate using `clap`.
-- Subcommand stubs for `find`, `fileinfo`, `folderinfo`, `playback`, `manifest`,
-  `subdivide`, and `compare`.
+- Subcommand stubs for `find`, `verify`, `fileinfo`, `folderinfo`, `playback`,
+  `manifest`, `subdivide`, and `compare`.
 - CI or local test instructions for `cargo fmt`, `cargo clippy`, `cargo test`,
   and Sphinx docs.
 
@@ -57,6 +57,10 @@ Deliverables:
 
 - `find` recursively identifies directories containing `.pod5` files and emits
   TSV and JSON.
+- `verify` checks one file by extension and by ONT POD5 content expectations,
+  including fixed leading and trailing signatures, combined-file layout sanity,
+  required table presence, and schema metadata needed to treat the file as
+  specification-adherent POD5.
 - `fileinfo` reports file path, size, schema/version where available, read
   count, flow cell ID, sequencing kit, start time, duration, and integrity
   status.
@@ -70,6 +74,8 @@ Acceptance criteria:
 - Output contracts are documented and tested.
 - Errors distinguish unreadable paths, non-POD5 files, parse failures, and
   integrity failures.
+- `verify` has a fast path for extension/signature failures and a deeper path
+  for schema/layout adherence once the concrete reader backend is connected.
 
 ## Milestone 3: Manifests, Comparison, and Subdivision Planning
 

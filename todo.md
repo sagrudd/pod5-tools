@@ -56,7 +56,21 @@ buildable or documentable, tested where applicable, committed, and pushed.
 - [x] Add tests for success and failure paths.
 - [x] Document operational caveats and field definitions.
 
-## Slice 7: `folderinfo`
+## Slice 7: `verify`
+
+- [ ] Add a `verify` subcommand to the CLI contract.
+- [ ] Check the input path exists, is a file, and has a `.pod5` extension.
+- [ ] Add fast content checks for the fixed ONT POD5 signature at the start and
+  end of the file.
+- [ ] Define deeper specification checks for combined-file layout, footer magic,
+  footer length, required Reads/Signal/Run Info tables, and required schema
+  metadata.
+- [ ] Emit TSV by default and JSON with an explicit option.
+- [ ] Add tests for extension, signature, truncated-file, and success/failure
+  reporting paths.
+- [ ] Document how `verify` maps failures to ONT POD5 specification concepts.
+
+## Slice 8: `folderinfo`
 
 - [ ] Aggregate `fileinfo` records across a folder.
 - [ ] Detect mixed flow cells, mixed sequencing kits, duplicate names, suspicious
@@ -65,7 +79,7 @@ buildable or documentable, tested where applicable, committed, and pushed.
 - [ ] Add tests for mixed and clean folder scenarios.
 - [ ] Document examples for sequencing core handoff checks.
 
-## Slice 8: Manifest and Compare Planning
+## Slice 9: Manifest and Compare Planning
 
 - [ ] Implement versioned manifest data structures.
 - [ ] Add `manifest` command for JSON and TSV inventories.
@@ -74,7 +88,7 @@ buildable or documentable, tested where applicable, committed, and pushed.
 - [ ] Define exit codes for automation use.
 - [ ] Document manifest schema versioning.
 
-## Slice 9: Subdivision Planning
+## Slice 10: Subdivision Planning
 
 - [ ] Implement `subdivide plan` for elapsed-time, file-count, read-count, and
   sample-label strategies.
@@ -82,7 +96,7 @@ buildable or documentable, tested where applicable, committed, and pushed.
 - [ ] Add deterministic tests for generated plans.
 - [ ] Document how plans can feed workflow development.
 
-## Slice 10: Playback Migration
+## Slice 11: Playback Migration
 
 - [ ] Extract Mnematikon playback concepts into standalone library types.
 - [ ] Migrate speedup, cutoff, bucket scheduling, and manifest tests.
@@ -90,7 +104,7 @@ buildable or documentable, tested where applicable, committed, and pushed.
 - [ ] Add `playback plan` and `playback emit` CLI surfaces.
 - [ ] Document compatibility notes for existing Mnematikon behavior.
 
-## Slice 11: Write-Capable Subdivision
+## Slice 12: Write-Capable Subdivision
 
 - [ ] Implement source-preserving output writing for selected subdivision modes.
 - [ ] Verify generated POD5 output integrity.
@@ -98,7 +112,7 @@ buildable or documentable, tested where applicable, committed, and pushed.
 - [ ] Add tests or documented fixture generation steps.
 - [ ] Document storage and performance caveats.
 
-## Slice 12: Release Preparation
+## Slice 13: Release Preparation
 
 - [ ] Audit all public structs and functions for Rust documentation comments.
 - [ ] Ensure README and Sphinx docs match implemented behavior.

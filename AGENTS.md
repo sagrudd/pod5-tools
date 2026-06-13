@@ -78,6 +78,8 @@ stabilizing but still subject to documented change.
 Planned commands include:
 
 - `find`: locate directories containing POD5 files.
+- `verify`: confirm a candidate file has a POD5 extension and specification-
+  adherent POD5 content.
 - `fileinfo`: inspect one POD5 file for QC, provenance, and integrity.
 - `folderinfo`: aggregate file information across a POD5 folder or run tree.
 - `playback`: emit existing POD5 data over time to simulate acquisition.

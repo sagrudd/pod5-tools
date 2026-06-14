@@ -13,6 +13,8 @@ Initial development release candidate.
 - Dockerized official `pod5.Reader` backend for `fileinfo` and `folderinfo`
   metadata, including flow cell ID, sequencing kit, read count, acquisition
   start time, duration, file version, and parser integrity status.
+- Automatic Docker backend image build when the selected parser image is absent
+  locally.
 - Versioned manifest, subdivision, playback, and provenance output contracts.
 - Sphinx documentation, Read the Docs configuration, CI, and automation-facing
   development guidance.

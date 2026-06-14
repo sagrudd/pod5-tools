@@ -8,9 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Stdio};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
@@ -720,6 +720,16 @@ impl std::error::Error for Pod5ReaderError {}
 /// Default container image used for POD5 parser subprocesses.
 pub const DEFAULT_POD5_BACKEND_IMAGE: &str = "pod5-tools-pod5:0.1.0";
 
+const POD5_BACKEND_DOCKERFILE: &str = r#"FROM python:3.12-slim
+
+ARG POD5_PACKAGE=pod5
+
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir "${POD5_PACKAGE}"
+
+WORKDIR /pod5-tools
+"#;
+
 const POD5_CONTAINER_METADATA_PYTHON: &str = r#"
 import datetime
 import json
@@ -878,6 +888,77 @@ impl DockerPod5MetadataReader {
                 .unwrap_or_else(|_| DEFAULT_POD5_BACKEND_IMAGE.to_string())
         })
     }
+
+    fn ensure_backend_image(
+        &self,
+        docker: &Path,
+        image: &str,
+        path: &Path,
+    ) -> Pod5ReaderResult<()> {
+        let inspect = ProcessCommand::new(docker)
+            .arg("image")
+            .arg("inspect")
+            .arg(image)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| Pod5ReaderError::Path {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "failed to inspect POD5 Docker backend image {image} using {}: {error}",
+                    docker.display()
+                ),
+            })?;
+        if inspect.success() {
+            return Ok(());
+        }
+
+        let mut build = ProcessCommand::new(docker)
+            .arg("build")
+            .arg("-t")
+            .arg(image)
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| Pod5ReaderError::Path {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "failed to start POD5 Docker backend image build for {image} using {}: {error}",
+                    docker.display()
+                ),
+            })?;
+
+        build
+            .stdin
+            .as_mut()
+            .expect("build stdin should be piped")
+            .write_all(POD5_BACKEND_DOCKERFILE.as_bytes())
+            .map_err(|error| Pod5ReaderError::Path {
+                path: path.to_path_buf(),
+                reason: format!("failed to send POD5 backend Dockerfile to docker build: {error}"),
+            })?;
+
+        let output = build
+            .wait_with_output()
+            .map_err(|error| Pod5ReaderError::Path {
+                path: path.to_path_buf(),
+                reason: format!("failed to wait for POD5 Docker backend image build: {error}"),
+            })?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Err(Pod5ReaderError::Schema {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "failed to build POD5 Docker backend image {image}; stdout: {stdout}; stderr: {stderr}"
+                ),
+            })
+        }
+    }
 }
 
 impl Pod5MetadataReader for DockerPod5MetadataReader {
@@ -918,6 +999,7 @@ impl Pod5MetadataReader for DockerPod5MetadataReader {
         let container_path = Path::new("/pod5-input").join(file_name);
         let docker = self.docker_executable();
         let image = self.image();
+        self.ensure_backend_image(&docker, &image, path)?;
         let output = ProcessCommand::new(&docker)
             .arg("run")
             .arg("--rm")
@@ -3165,6 +3247,32 @@ JSON
         fs::set_permissions(path, permissions).unwrap();
     }
 
+    fn write_fake_missing_image_docker(path: &Path, log: &Path) {
+        fs::write(
+            path,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+    exit 1
+fi
+if [ "$1" = "build" ]; then
+    cat >/dev/null
+    exit 0
+fi
+cat <<'JSON'
+{{"flow_cell_id":"FLO-MIN114","sequencing_kit":"SQK-LSK114","read_count":123,"acquisition_start_utc":"2026-06-13T09:00:00Z","duration_seconds":45.5,"pod5_version":"0.3.34"}}
+JSON
+"#,
+                log.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
     #[test]
     fn docker_fileinfo_reads_metadata_from_backend() {
         let root = tempfile::tempdir().unwrap();
@@ -3182,6 +3290,25 @@ JSON
         assert_eq!(info.duration_seconds, Some(45.5));
         assert_eq!(info.pod5_version.as_deref(), Some("0.3.34"));
         assert_eq!(info.integrity, IntegrityStatus::Passed);
+    }
+
+    #[test]
+    fn docker_fileinfo_builds_missing_backend_image() {
+        let root = tempfile::tempdir().unwrap();
+        let pod5 = root.path().join("reads.pod5");
+        let backend = root.path().join("fake-docker");
+        let log = root.path().join("docker.log");
+        fs::write(&pod5, b"pod5").unwrap();
+        write_fake_missing_image_docker(&backend, &log);
+
+        let reader = DockerPod5MetadataReader::with_docker(&backend, "pod5-tools-test:latest");
+        let info = read_pod5_file_info(&reader, &pod5).unwrap();
+        let docker_log = fs::read_to_string(log).unwrap();
+
+        assert_eq!(info.read_count, Some(123));
+        assert!(docker_log.contains("image inspect pod5-tools-test:latest"));
+        assert!(docker_log.contains("build -t pod5-tools-test:latest -"));
+        assert!(docker_log.contains("run --rm --network none"));
     }
 
     #[test]

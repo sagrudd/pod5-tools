@@ -53,10 +53,10 @@ pod5-tools playback emit --manifest playback_manifest.json --sample sample-a --s
 
 `fileinfo` and `folderinfo` parse POD5 internals only through a Dockerized
 backend image that contains Oxford Nanopore's official Python `pod5` package.
-Build the default backend image before running metadata commands:
+When the selected backend image is absent, `pod5-tools` builds it automatically
+before running metadata commands:
 
 ```text
-docker build -t pod5-tools-pod5:0.1.0 docker/pod5-backend
 pod5-tools fileinfo /path/to/file.pod5
 ```
 
@@ -64,6 +64,14 @@ The native Rust binary invokes `docker run --rm --network none`, mounts the
 source POD5 file's parent directory read-only, and reads metadata inside the
 container. Use `POD5_TOOLS_DOCKER` to select a Docker-compatible runtime and
 `POD5_TOOLS_POD5_IMAGE` to select a different backend image.
+
+You can also build the image explicitly, for example to pre-seed a DGX Spark or
+pin a specific ONT package version:
+
+```text
+docker build -t pod5-tools-pod5:0.1.0 docker/pod5-backend
+docker build --build-arg POD5_PACKAGE=pod5==0.3.39 -t pod5-tools-pod5:0.1.0 docker/pod5-backend
+```
 
 Command groups:
 

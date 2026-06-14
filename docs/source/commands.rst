@@ -65,11 +65,12 @@ image containing Oxford Nanopore's official Python ``pod5`` package. It reports
 file size, run metadata, read count, acquisition timing, file version, and
 parser integrity status.
 
-Build the default backend image before running metadata commands:
+When the selected backend image is absent, ``pod5-tools`` builds it
+automatically before running metadata commands:
 
 .. code-block:: sh
 
-   docker build -t pod5-tools-pod5:0.1.0 docker/pod5-backend
+   pod5-tools fileinfo /path/to/file.pod5
 
 At runtime, ``pod5-tools`` invokes ``docker run --rm --network none``, mounts
 the input file's parent directory read-only at ``/pod5-input``, and asks the
@@ -80,6 +81,13 @@ backend image:
 .. code-block:: sh
 
    POD5_TOOLS_POD5_IMAGE=registry.example/pod5-tools-pod5:0.1.0 pod5-tools fileinfo /path/to/file.pod5
+
+To pre-seed a host or pin the ONT ``pod5`` package, build the image explicitly:
+
+.. code-block:: sh
+
+   docker build -t pod5-tools-pod5:0.1.0 docker/pod5-backend
+   docker build --build-arg POD5_PACKAGE=pod5==0.3.39 -t pod5-tools-pod5:0.1.0 docker/pod5-backend
 
 TSV is emitted by default. JSON is available with ``--format json``.
 
@@ -96,8 +104,8 @@ Output fields:
 
 Operational caveats:
 
-* the selected container image must be available locally or pullable by the
-  Docker runtime;
+* Docker must be available and able to build the selected backend image when it
+  is missing;
 * the selected container image must be able to ``import pod5``;
 * files that cannot be opened by ``pod5.Reader`` fail before output is emitted;
 * missing files, directories, and non-POD5 files fail before output is emitted.
@@ -193,8 +201,8 @@ Operational caveats:
 
 * duplicate file-name detection and fast verification failure detection are
   active now;
-* the selected container image must be available locally or pullable by the
-  Docker runtime;
+* Docker must be available and able to build the selected backend image when it
+  is missing;
 * the selected container image must be able to ``import pod5``;
 * folder summaries fail individual files that cannot be opened by
   ``pod5.Reader``.

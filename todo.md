@@ -124,6 +124,8 @@ buildable or documentable, tested where applicable, committed, and pushed.
 
 - [x] Replace host-Python metadata parsing with a Docker-only parser backend.
 - [x] Add a backend Dockerfile that installs Oxford Nanopore's `pod5` package.
+- [x] Build the Docker backend image automatically when the selected image is
+  missing locally.
 - [x] Mount source POD5 directories read-only during parser invocations.
 - [x] Document `POD5_TOOLS_DOCKER`, `POD5_TOOLS_POD5_IMAGE`, and image build
   workflow.

@@ -56,11 +56,16 @@ record to the Rust command layer.
 
 The Docker executable is selected from ``POD5_TOOLS_DOCKER`` or ``docker``.
 The backend image is selected from ``POD5_TOOLS_POD5_IMAGE`` or
-``pod5-tools-pod5:0.1.0``. Build the default image with:
+``pod5-tools-pod5:0.1.0``. If the selected image is absent, the reader builds
+it from an embedded Dockerfile before running the parser.
+
+The repository also includes the backend Dockerfile for manual pre-seeding or
+package pinning:
 
 .. code-block:: sh
 
    docker build -t pod5-tools-pod5:0.1.0 docker/pod5-backend
+   docker build --build-arg POD5_PACKAGE=pod5==0.3.39 -t pod5-tools-pod5:0.1.0 docker/pod5-backend
 
 Reader adapters return typed errors with separate categories for path, format,
 schema, and integrity failures. Commands should preserve those categories in

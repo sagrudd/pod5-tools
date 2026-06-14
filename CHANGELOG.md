@@ -24,6 +24,8 @@ Initial development release candidate.
   primitives migrated from Mnematikon without API/session coupling.
 - Sphinx documentation, Read the Docs configuration, CI, and automation-facing
   development guidance.
+- Mocked-reader test coverage for folder-level mixed flow-cell and sequencing
+  kit aggregation.
 
 ### Known Limitations
 

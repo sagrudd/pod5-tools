@@ -3002,6 +3002,97 @@ mod tests {
         );
     }
 
+    #[derive(Debug)]
+    struct PathAwareMockReader {
+        records: BTreeMap<PathBuf, Pod5FileInfo>,
+    }
+
+    impl Pod5MetadataReader for PathAwareMockReader {
+        fn read_file_info(&self, path: &Path) -> Pod5ReaderResult<Pod5FileInfo> {
+            self.records
+                .get(path)
+                .cloned()
+                .ok_or_else(|| Pod5ReaderError::Path {
+                    path: path.to_path_buf(),
+                    reason: "mock metadata missing".to_string(),
+                })
+        }
+    }
+
+    #[test]
+    fn folderinfo_aggregates_mixed_flow_cells_from_reader_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first.pod5");
+        let second = root.path().join("second.pod5");
+        write_signature_fixture(&first);
+        write_signature_fixture(&second);
+
+        let reader = PathAwareMockReader {
+            records: BTreeMap::from([
+                (
+                    first.clone(),
+                    Pod5FileInfo {
+                        path: first.clone(),
+                        size_bytes: 32,
+                        flow_cell_id: Some("FLO-MIN114-A".to_string()),
+                        sequencing_kit: Some("SQK-LSK114".to_string()),
+                        read_count: Some(10),
+                        acquisition_start_utc: Some("2026-06-13T10:00:00Z".to_string()),
+                        duration_seconds: Some(120.0),
+                        pod5_version: Some("3".to_string()),
+                        integrity: IntegrityStatus::Passed,
+                    },
+                ),
+                (
+                    second.clone(),
+                    Pod5FileInfo {
+                        path: second.clone(),
+                        size_bytes: 32,
+                        flow_cell_id: Some("FLO-MIN114-B".to_string()),
+                        sequencing_kit: Some("SQK-RBK114".to_string()),
+                        read_count: Some(15),
+                        acquisition_start_utc: Some("2026-06-13T10:05:00Z".to_string()),
+                        duration_seconds: Some(180.0),
+                        pod5_version: Some("3".to_string()),
+                        integrity: IntegrityStatus::Passed,
+                    },
+                ),
+            ]),
+        };
+
+        let info = folder_info(root.path(), &reader).unwrap();
+
+        assert_eq!(info.pod5_file_count, 2);
+        assert_eq!(info.total_bytes, 64);
+        assert_eq!(info.total_reads, Some(25));
+        assert_eq!(
+            info.flow_cell_ids,
+            vec!["FLO-MIN114-A".to_string(), "FLO-MIN114-B".to_string()]
+        );
+        assert_eq!(
+            info.sequencing_kits,
+            vec!["SQK-LSK114".to_string(), "SQK-RBK114".to_string()]
+        );
+        assert_eq!(
+            info.acquisition_start_utc.as_deref(),
+            Some("2026-06-13T10:00:00Z")
+        );
+        assert_eq!(
+            info.acquisition_end_utc.as_deref(),
+            Some("2026-06-13T10:05:00Z")
+        );
+        assert!(
+            !info
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("flow cell metadata unavailable"))
+        );
+        assert!(matches!(
+            info.integrity,
+            IntegrityStatus::Unavailable { .. }
+        ));
+    }
+
     #[test]
     fn run_folderinfo_emits_tsv_by_default() {
         let root = tempfile::tempdir().unwrap();

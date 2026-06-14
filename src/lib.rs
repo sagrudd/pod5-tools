@@ -10,6 +10,7 @@ use std::fmt;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
@@ -716,11 +717,252 @@ impl fmt::Display for Pod5ReaderError {
 
 impl std::error::Error for Pod5ReaderError {}
 
+const POD5_METADATA_PYTHON: &str = r#"
+import datetime
+import json
+import math
+import sys
+
+
+def clean_string(value):
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
+
+
+def number(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def timestamp(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime.datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=datetime.timezone.utc)
+        value = value.astimezone(datetime.timezone.utc)
+        return value.isoformat().replace("+00:00", "Z")
+    return clean_string(value)
+
+
+def fail(category, message):
+    print(json.dumps({"error_category": category, "error": str(message)}))
+    sys.exit(1)
+
+
+try:
+    import pod5
+except Exception as exc:
+    fail("backend", f"failed to import official pod5 Python package: {exc}")
+
+
+path = sys.argv[-1]
+
+try:
+    with pod5.Reader(path) as reader:
+        read_count = getattr(reader, "num_reads", None)
+        file_version = clean_string(getattr(reader, "file_version", None))
+        flow_cell_id = None
+        sequencing_kit = None
+        acquisition_start_utc = None
+        duration_seconds = None
+        max_end_sample = None
+        sample_rate = None
+
+        for read in reader.reads():
+            run_info = getattr(read, "run_info", None)
+            if run_info is not None:
+                if flow_cell_id is None:
+                    flow_cell_id = clean_string(getattr(run_info, "flow_cell_id", None))
+                if sequencing_kit is None:
+                    sequencing_kit = clean_string(getattr(run_info, "sequencing_kit", None))
+                if acquisition_start_utc is None:
+                    acquisition_start_utc = timestamp(
+                        getattr(run_info, "acquisition_start_time", None)
+                    )
+                if sample_rate is None:
+                    sample_rate = number(getattr(run_info, "sample_rate", None))
+
+            start_sample = number(getattr(read, "start_sample", None))
+            sample_count = number(getattr(read, "num_samples", None))
+            if sample_count is None:
+                sample_count = number(getattr(read, "sample_count", None))
+            if start_sample is not None and sample_count is not None:
+                end_sample = start_sample + sample_count
+                if max_end_sample is None or end_sample > max_end_sample:
+                    max_end_sample = end_sample
+
+        if sample_rate and max_end_sample is not None and sample_rate > 0:
+            duration_seconds = max_end_sample / sample_rate
+            if math.isnan(duration_seconds) or math.isinf(duration_seconds):
+                duration_seconds = None
+
+        print(
+            json.dumps(
+                {
+                    "flow_cell_id": flow_cell_id,
+                    "sequencing_kit": sequencing_kit,
+                    "read_count": read_count,
+                    "acquisition_start_utc": acquisition_start_utc,
+                    "duration_seconds": duration_seconds,
+                    "pod5_version": file_version,
+                }
+            )
+        )
+except FileNotFoundError as exc:
+    fail("path", exc)
+except Exception as exc:
+    fail("schema", exc)
+"#;
+
+#[derive(Debug, Deserialize)]
+struct OfficialPod5BackendOutput {
+    flow_cell_id: Option<String>,
+    sequencing_kit: Option<String>,
+    read_count: Option<u64>,
+    acquisition_start_utc: Option<String>,
+    duration_seconds: Option<f64>,
+    pod5_version: Option<String>,
+    error_category: Option<String>,
+    error: Option<String>,
+}
+
+/// POD5 metadata reader backed by Oxford Nanopore's official Python package.
+///
+/// The adapter invokes ``python -c`` with a small read-only helper that imports
+/// ``pod5.Reader``. The executable is selected from ``POD5_TOOLS_PYTHON`` when
+/// set, otherwise ``python3`` is used. The selected Python environment must
+/// have the official ``pod5`` package installed.
+#[derive(Clone, Debug, Default)]
+pub struct OfficialPod5MetadataReader {
+    python: Option<PathBuf>,
+}
+
+impl OfficialPod5MetadataReader {
+    /// Create a reader that uses ``POD5_TOOLS_PYTHON`` or ``python3``.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a reader with an explicit Python executable path.
+    pub fn with_python(python: impl Into<PathBuf>) -> Self {
+        Self {
+            python: Some(python.into()),
+        }
+    }
+
+    fn python_executable(&self) -> PathBuf {
+        self.python.clone().unwrap_or_else(|| {
+            std::env::var_os("POD5_TOOLS_PYTHON")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("python3"))
+        })
+    }
+}
+
+impl Pod5MetadataReader for OfficialPod5MetadataReader {
+    fn read_file_info(&self, path: &Path) -> Pod5ReaderResult<Pod5FileInfo> {
+        let metadata = fs::metadata(path).map_err(|error| Pod5ReaderError::Path {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+        if !metadata.is_file() {
+            return Err(Pod5ReaderError::Path {
+                path: path.to_path_buf(),
+                reason: "expected a file".to_string(),
+            });
+        }
+        if !is_pod5_path(path) {
+            return Err(Pod5ReaderError::Format {
+                path: path.to_path_buf(),
+                reason: "expected a .pod5 file".to_string(),
+            });
+        }
+
+        let python = self.python_executable();
+        let output = ProcessCommand::new(&python)
+            .arg("-c")
+            .arg(POD5_METADATA_PYTHON)
+            .arg("--")
+            .arg(path)
+            .output()
+            .map_err(|error| Pod5ReaderError::Path {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "failed to run POD5 Python backend {}: {error}",
+                    python.display()
+                ),
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let parsed =
+            serde_json::from_str::<OfficialPod5BackendOutput>(&stdout).map_err(|error| {
+                Pod5ReaderError::Schema {
+                    path: path.to_path_buf(),
+                    reason: format!(
+                        "failed to parse POD5 Python backend output: {error}; stderr: {stderr}"
+                    ),
+                }
+            })?;
+
+        if !output.status.success() {
+            let reason = parsed.error.unwrap_or_else(|| {
+                if stderr.is_empty() {
+                    "POD5 Python backend failed without a diagnostic".to_string()
+                } else {
+                    stderr
+                }
+            });
+            return match parsed.error_category.as_deref() {
+                Some("path") => Err(Pod5ReaderError::Path {
+                    path: path.to_path_buf(),
+                    reason,
+                }),
+                Some("backend") => Err(Pod5ReaderError::Schema {
+                    path: path.to_path_buf(),
+                    reason,
+                }),
+                Some("integrity") => Err(Pod5ReaderError::Integrity {
+                    path: path.to_path_buf(),
+                    reason,
+                }),
+                Some("format") => Err(Pod5ReaderError::Format {
+                    path: path.to_path_buf(),
+                    reason,
+                }),
+                _ => Err(Pod5ReaderError::Schema {
+                    path: path.to_path_buf(),
+                    reason,
+                }),
+            };
+        }
+
+        Ok(Pod5FileInfo {
+            path: path.to_path_buf(),
+            size_bytes: metadata.len(),
+            flow_cell_id: parsed.flow_cell_id,
+            sequencing_kit: parsed.sequencing_kit,
+            read_count: parsed.read_count,
+            acquisition_start_utc: parsed.acquisition_start_utc,
+            duration_seconds: parsed.duration_seconds,
+            pod5_version: parsed.pod5_version,
+            integrity: IntegrityStatus::Passed,
+        })
+    }
+}
+
 /// Filesystem-only POD5 metadata reader.
 ///
-/// This reader validates that an input is a `.pod5` file and reports file size.
-/// POD5-internal fields are left unavailable until a concrete POD5 parser
-/// backend is connected behind `Pod5MetadataReader`.
+/// This reader validates that an input is a `.pod5` file and reports file size
+/// without parsing POD5 internals. It is intended for tests and explicit
+/// fallback use; the command-line defaults use `OfficialPod5MetadataReader`.
 #[derive(Debug, Default)]
 pub struct FilesystemPod5MetadataReader;
 
@@ -813,7 +1055,7 @@ pub fn run(cli: Cli) -> Result<String, Pod5ToolsError> {
     match cli.command {
         Command::Find { path, format } => run_find(path, format),
         Command::Fileinfo { path, format } => {
-            run_fileinfo(&FilesystemPod5MetadataReader, &path, format)
+            run_fileinfo(&OfficialPod5MetadataReader::new(), &path, format)
         }
         Command::Verify { path, format } => run_verify(&path, format),
         Command::Folderinfo { path, format } => run_folderinfo(&path, format),
@@ -1002,7 +1244,7 @@ fn run_verify(path: &Path, format: OutputFormat) -> Result<String, Pod5ToolsErro
 }
 
 fn run_folderinfo(path: &Path, format: OutputFormat) -> Result<String, Pod5ToolsError> {
-    let info = folder_info(path, &FilesystemPod5MetadataReader)?;
+    let info = folder_info(path, &OfficialPod5MetadataReader::new())?;
     match format {
         OutputFormat::Tsv => Ok(format_folder_info_tsv(&info)),
         OutputFormat::Json => serde_json::to_string_pretty(&info)
@@ -1322,8 +1564,11 @@ pub fn folder_info(
     let mut sequencing_kits = BTreeSet::<String>::new();
     let mut starts = Vec::<String>::new();
     let mut failed_file_count = 0_u64;
+    let mut metadata_integrity_failed_count = 0_u64;
     let mut verification_failed_count = 0_u64;
     let mut names = BTreeMap::<String, u64>::new();
+    let mut saw_integrity_passed = false;
+    let mut saw_integrity_gap = false;
 
     for file in &files {
         if let Some(name) = file.file_name().and_then(|name| name.to_str()) {
@@ -1345,6 +1590,13 @@ pub fn folder_info(
                 }
                 if let Some(start) = info.acquisition_start_utc {
                     starts.push(start);
+                }
+                match info.integrity {
+                    IntegrityStatus::Passed => saw_integrity_passed = true,
+                    IntegrityStatus::Failed { .. } => metadata_integrity_failed_count += 1,
+                    IntegrityStatus::NotChecked | IntegrityStatus::Unavailable { .. } => {
+                        saw_integrity_gap = true;
+                    }
                 }
             }
             Err(_) => failed_file_count += 1,
@@ -1379,16 +1631,24 @@ pub fn folder_info(
     if verification_failed_count > 0 {
         warnings.push("one or more files failed implemented verification checks".to_string());
     }
+    if metadata_integrity_failed_count > 0 {
+        warnings.push("one or more files failed parser integrity checks".to_string());
+    }
     if failed_file_count > 0 {
         warnings.push("one or more files could not be read by the metadata reader".to_string());
     }
 
-    let integrity = if failed_file_count > 0 || verification_failed_count > 0 {
+    let integrity = if failed_file_count > 0
+        || verification_failed_count > 0
+        || metadata_integrity_failed_count > 0
+    {
         IntegrityStatus::Failed {
             reason: "one or more files failed metadata or verification checks".to_string(),
         }
     } else if files.is_empty() {
         IntegrityStatus::NotChecked
+    } else if saw_integrity_passed && !saw_integrity_gap {
+        IntegrityStatus::Passed
     } else {
         IntegrityStatus::Unavailable {
             reason: "deep POD5 integrity requires the parser backend".to_string(),
@@ -2510,6 +2770,7 @@ pub fn safe_filename_component(value: &str) -> String {
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn cli_parses_find_with_default_tsv_output() {
@@ -2811,35 +3072,34 @@ mod tests {
     fn run_fileinfo_emits_tsv_by_default() {
         let root = tempfile::tempdir().unwrap();
         let pod5 = root.path().join("reads.pod5");
+        let backend = root.path().join("fake-pod5-backend");
         fs::write(&pod5, b"pod5").unwrap();
+        write_fake_pod5_backend(&backend);
 
-        let cli = Cli::try_parse_from(["pod5-tools", "fileinfo", pod5.to_str().unwrap()]).unwrap();
-        let output = run(cli).unwrap();
+        let reader = OfficialPod5MetadataReader::with_python(&backend);
+        let output = run_fileinfo(&reader, &pod5, OutputFormat::Tsv).unwrap();
 
         assert!(output.starts_with("path\tsize_bytes\tflow_cell_id"));
-        assert!(output.contains("\t4\t"));
-        assert!(output.contains("\tunavailable\tPOD5 parser backend not configured"));
+        assert!(output.contains("\t4\tFLO-MIN114\tSQK-LSK114\t123\t"));
+        assert!(output.ends_with("\tpassed\t"));
     }
 
     #[test]
     fn run_fileinfo_emits_json_when_requested() {
         let root = tempfile::tempdir().unwrap();
         let pod5 = root.path().join("reads.pod5");
+        let backend = root.path().join("fake-pod5-backend");
         fs::write(&pod5, b"pod5").unwrap();
+        write_fake_pod5_backend(&backend);
 
-        let cli = Cli::try_parse_from([
-            "pod5-tools",
-            "fileinfo",
-            pod5.to_str().unwrap(),
-            "--format",
-            "json",
-        ])
-        .unwrap();
-        let output = run(cli).unwrap();
+        let reader = OfficialPod5MetadataReader::with_python(&backend);
+        let output = run_fileinfo(&reader, &pod5, OutputFormat::Json).unwrap();
 
         assert!(output.contains("\"size_bytes\": 4"));
-        assert!(output.contains("\"flow_cell_id\": null"));
-        assert!(output.contains("\"Unavailable\""));
+        assert!(output.contains("\"flow_cell_id\": \"FLO-MIN114\""));
+        assert!(output.contains("\"sequencing_kit\": \"SQK-LSK114\""));
+        assert!(output.contains("\"read_count\": 123"));
+        assert!(output.contains("\"Passed\""));
     }
 
     fn write_signature_fixture(path: &Path) {
@@ -2848,6 +3108,40 @@ mod tests {
         bytes.extend_from_slice(&[0_u8; 16]);
         bytes.extend_from_slice(&POD5_SIGNATURE);
         fs::write(path, bytes).unwrap();
+    }
+
+    fn write_fake_pod5_backend(path: &Path) {
+        fs::write(
+            path,
+            r#"#!/bin/sh
+cat <<'JSON'
+{"flow_cell_id":"FLO-MIN114","sequencing_kit":"SQK-LSK114","read_count":123,"acquisition_start_utc":"2026-06-13T09:00:00Z","duration_seconds":45.5,"pod5_version":"0.3.34"}
+JSON
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[test]
+    fn official_fileinfo_reads_metadata_from_backend() {
+        let root = tempfile::tempdir().unwrap();
+        let pod5 = root.path().join("reads.pod5");
+        let backend = root.path().join("fake-pod5-backend");
+        fs::write(&pod5, b"pod5").unwrap();
+        write_fake_pod5_backend(&backend);
+
+        let reader = OfficialPod5MetadataReader::with_python(&backend);
+        let info = read_pod5_file_info(&reader, &pod5).unwrap();
+
+        assert_eq!(info.flow_cell_id.as_deref(), Some("FLO-MIN114"));
+        assert_eq!(info.sequencing_kit.as_deref(), Some("SQK-LSK114"));
+        assert_eq!(info.read_count, Some(123));
+        assert_eq!(info.duration_seconds, Some(45.5));
+        assert_eq!(info.pod5_version.as_deref(), Some("0.3.34"));
+        assert_eq!(info.integrity, IntegrityStatus::Passed);
     }
 
     #[test]
@@ -3087,42 +3381,45 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("flow cell metadata unavailable"))
         );
-        assert!(matches!(
-            info.integrity,
-            IntegrityStatus::Unavailable { .. }
-        ));
+        assert_eq!(info.integrity, IntegrityStatus::Passed);
     }
 
     #[test]
     fn run_folderinfo_emits_tsv_by_default() {
         let root = tempfile::tempdir().unwrap();
+        let backend = root.path().join("fake-pod5-backend");
         write_signature_fixture(&root.path().join("reads.pod5"));
+        write_fake_pod5_backend(&backend);
 
-        let cli = Cli::try_parse_from(["pod5-tools", "folderinfo", root.path().to_str().unwrap()])
-            .unwrap();
-        let output = run(cli).unwrap();
+        let info = folder_info(
+            root.path(),
+            &OfficialPod5MetadataReader::with_python(&backend),
+        )
+        .unwrap();
+        let output = format_folder_info_tsv(&info);
 
         assert!(output.starts_with("path\tpod5_file_count\ttotal_bytes"));
-        assert!(output.contains("\t1\t32\t"));
-        assert!(output.contains("deep POD5 integrity requires the parser backend"));
+        assert!(output.contains("\t1\t32\t123\tFLO-MIN114\tSQK-LSK114\t"));
+        assert!(output.contains("\tpassed\t"));
     }
 
     #[test]
     fn run_folderinfo_emits_json_when_requested() {
         let root = tempfile::tempdir().unwrap();
+        let backend = root.path().join("fake-pod5-backend");
         write_signature_fixture(&root.path().join("reads.pod5"));
+        write_fake_pod5_backend(&backend);
 
-        let cli = Cli::try_parse_from([
-            "pod5-tools",
-            "folderinfo",
-            root.path().to_str().unwrap(),
-            "--format",
-            "json",
-        ])
+        let info = folder_info(
+            root.path(),
+            &OfficialPod5MetadataReader::with_python(&backend),
+        )
         .unwrap();
-        let output = run(cli).unwrap();
+        let output = serde_json::to_string_pretty(&info).unwrap();
 
         assert!(output.contains("\"pod5_file_count\": 1"));
+        assert!(output.contains("\"total_reads\": 123"));
+        assert!(output.contains("\"FLO-MIN114\""));
         assert!(output.contains("\"verification_failed_count\": 0"));
     }
 

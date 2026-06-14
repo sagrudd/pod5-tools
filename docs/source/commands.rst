@@ -1,12 +1,11 @@
 Command Plan
 ============
 
-The command-line interface is implemented in Rust using ``clap``. ``find``, the
-filesystem-backed part of ``fileinfo``, fast ``verify`` extension/signature
-checks, filesystem-backed ``folderinfo``, versioned ``manifest`` output, basic
-``compare``, read-only ``subdivide plan``, and read-only playback planning
-surfaces are implemented. Deeper POD5 metadata parsing and read-level POD5
-rewriting remain backend-dependent future work.
+The command-line interface is implemented in Rust using ``clap``. ``find``,
+``fileinfo``, fast ``verify`` extension/signature checks, ``folderinfo``,
+versioned ``manifest`` output, basic ``compare``, read-only ``subdivide plan``,
+and read-only playback planning surfaces are implemented. Read-level POD5
+rewriting remains backend-dependent future work.
 
 Preview help:
 
@@ -61,9 +60,16 @@ Usage:
    cargo run -- fileinfo /path/to/file.pod5 --format json
 
 Current behavior validates that the input exists, is a file, and has a
-``.pod5`` extension. It reports file size and emits the planned metadata fields.
-Until a concrete POD5 reader backend is connected, POD5-internal fields are
-empty or ``null`` and integrity is reported as unavailable.
+``.pod5`` extension, then reads POD5 internals through Oxford Nanopore's
+official Python ``pod5`` package. It reports file size, run metadata, read
+count, acquisition timing, file version, and parser integrity status.
+
+The default backend executable is ``python3``. Set ``POD5_TOOLS_PYTHON`` to use
+a specific interpreter or virtual environment:
+
+.. code-block:: sh
+
+   POD5_TOOLS_PYTHON=/path/to/python pod5-tools fileinfo /path/to/file.pod5
 
 TSV is emitted by default. JSON is available with ``--format json``.
 
@@ -80,8 +86,8 @@ Output fields:
 
 Operational caveats:
 
-* ``fileinfo`` does not yet parse POD5 internals.
-* ``fileinfo`` does not yet prove that the file is intact.
+* the selected Python environment must be able to ``import pod5``;
+* files that cannot be opened by ``pod5.Reader`` fail before output is emitted;
 * missing files, directories, and non-POD5 files fail before output is emitted.
 
 Example TSV output:
@@ -89,7 +95,7 @@ Example TSV output:
 .. code-block:: text
 
    path	size_bytes	flow_cell_id	sequencing_kit	read_count	acquisition_start_utc	duration_seconds	pod5_version	integrity_status	integrity_reason
-   /data/run/pod5/reads.pod5	1048576								unavailable	POD5 parser backend not configured; only filesystem metadata was inspected
+   /data/run/pod5/reads.pod5	1048576	FLO-MIN114	SQK-LSK114	42000	2026-06-13T09:12:30Z	823.75	0.3.34	passed
 
 ``verify``
 ----------
@@ -151,7 +157,8 @@ Usage:
    cargo run -- folderinfo /path/to/folder --format json
 
 Current behavior recursively finds ``.pod5`` files, aggregates the current
-``fileinfo`` fields, and runs the implemented ``verify`` checks for each file.
+``fileinfo`` fields through the same official Python ``pod5`` backend, and runs
+the implemented ``verify`` checks for each file.
 
 TSV is emitted by default. JSON is available with ``--format json``.
 
@@ -172,18 +179,18 @@ Output fields:
 
 Operational caveats:
 
-* mixed flow cell, mixed sequencing kit, and temporal-gap checks depend on POD5
-  metadata that is not yet available from the filesystem-only reader;
 * duplicate file-name detection and fast verification failure detection are
   active now;
-* deep integrity still requires the future POD5 parser backend.
+* the selected Python environment must be able to ``import pod5``;
+* folder summaries fail individual files that cannot be opened by
+  ``pod5.Reader``.
 
 Example TSV output:
 
 .. code-block:: text
 
    path	pod5_file_count	total_bytes	total_reads	flow_cell_ids	sequencing_kits	acquisition_start_utc	acquisition_end_utc	integrity_status	integrity_reason	failed_file_count	verification_failed_count	duplicate_file_names	warnings
-   /data/run/pod5	24	781246272						unavailable	deep POD5 integrity requires the parser backend	0	0		flow cell metadata unavailable with current POD5 reader backend
+   /data/run/pod5	24	781246272	980000	FLO-MIN114	SQK-LSK114	2026-06-13T09:12:30Z	2026-06-13T10:45:03Z	passed		0	0
 
 ``manifest``
 ------------

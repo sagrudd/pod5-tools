@@ -51,6 +51,15 @@ pod5-tools playback plan --manifest playback_manifest.json --sample sample-a
 pod5-tools playback emit --manifest playback_manifest.json --sample sample-a --speedup 5x
 ```
 
+`fileinfo` and `folderinfo` use Oxford Nanopore's official Python `pod5`
+reader to parse file internals. Install the package in the active Python
+environment, or point `pod5-tools` at the intended interpreter:
+
+```text
+pip install pod5
+POD5_TOOLS_PYTHON=/path/to/python pod5-tools fileinfo /path/to/file.pod5
+```
+
 Command groups:
 
 - `find`: locate folders containing one or more POD5 files and report tabular

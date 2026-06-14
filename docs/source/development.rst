@@ -20,10 +20,10 @@ From the repository root:
    cargo run -- --help
 
 The current implementation includes read-only discovery, fast verification,
-filesystem-backed metadata summaries, manifests, comparison, subdivision
+official-POD5-backed metadata summaries, manifests, comparison, subdivision
 planning, whole-file subdivision materialization, and playback schedule
-inspection. Deep POD5 metadata parsing and read-level POD5 rewriting still
-depend on a future concrete POD5 reader/writer backend.
+inspection. Read-level POD5 rewriting still depends on a future concrete writer
+backend.
 
 Versioning
 ----------
@@ -48,6 +48,12 @@ a concrete POD5 parser. This keeps ``fileinfo``, ``folderinfo``, manifests, and
 future subdivision planning testable without committing large binary fixtures to
 the repository.
 
+The command-line default is ``OfficialPod5MetadataReader``. It invokes Oxford
+Nanopore's official Python ``pod5.Reader`` in a read-only subprocess and selects
+the executable from ``POD5_TOOLS_PYTHON`` or ``python3``. ``fileinfo`` and
+``folderinfo`` therefore require a Python environment where ``import pod5``
+succeeds.
+
 Reader adapters return typed errors with separate categories for path, format,
 schema, and integrity failures. Commands should preserve those categories in
 machine-readable output and use them to choose meaningful exit statuses in later
@@ -56,22 +62,11 @@ slices.
 Backend Evaluation
 ------------------
 
-Two implementation routes remain open for the concrete POD5 reader:
-
-* Rust-native Arrow access could keep the toolchain simpler for Rust users,
-  allow direct integration with Rust data structures, and avoid shelling out to
-  Python. The risk is that POD5 is more than generic Arrow tables; schema
-  interpretation, compression details, and integrity behavior must match the
-  official implementation closely.
-* Binding to the official POD5 implementation should provide the best semantic
-  compatibility with ONT files and schema changes. The tradeoff is packaging
-  complexity, especially for a Rust binary expected to work cleanly on local
-  infrastructure without fragile Python environment assumptions.
-
-The next implementation step after release preparation should prefer a small
-adapter spike. The adapter must prove that it can read flow cell ID, sequencing
-kit, read count, acquisition start, duration, version/schema details, and
-integrity state from realistic POD5 files.
+The project now uses the official Python ``pod5`` reader for semantic
+compatibility with ONT files and schema changes. A Rust-native Arrow reader can
+still be evaluated later if packaging the Python dependency becomes a deployment
+problem, but it must match the official implementation before it can replace the
+default backend.
 
 Local Documentation Build
 -------------------------

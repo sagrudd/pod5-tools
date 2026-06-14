@@ -60,16 +60,26 @@ Usage:
    cargo run -- fileinfo /path/to/file.pod5 --format json
 
 Current behavior validates that the input exists, is a file, and has a
-``.pod5`` extension, then reads POD5 internals through Oxford Nanopore's
-official Python ``pod5`` package. It reports file size, run metadata, read
-count, acquisition timing, file version, and parser integrity status.
+``.pod5`` extension, then reads POD5 internals through a Dockerized backend
+image containing Oxford Nanopore's official Python ``pod5`` package. It reports
+file size, run metadata, read count, acquisition timing, file version, and
+parser integrity status.
 
-The default backend executable is ``python3``. Set ``POD5_TOOLS_PYTHON`` to use
-a specific interpreter or virtual environment:
+Build the default backend image before running metadata commands:
 
 .. code-block:: sh
 
-   POD5_TOOLS_PYTHON=/path/to/python pod5-tools fileinfo /path/to/file.pod5
+   docker build -t pod5-tools-pod5:0.1.0 docker/pod5-backend
+
+At runtime, ``pod5-tools`` invokes ``docker run --rm --network none``, mounts
+the input file's parent directory read-only at ``/pod5-input``, and asks the
+container to parse the mounted file. Set ``POD5_TOOLS_DOCKER`` to choose a
+Docker-compatible runtime and ``POD5_TOOLS_POD5_IMAGE`` to choose a different
+backend image:
+
+.. code-block:: sh
+
+   POD5_TOOLS_POD5_IMAGE=registry.example/pod5-tools-pod5:0.1.0 pod5-tools fileinfo /path/to/file.pod5
 
 TSV is emitted by default. JSON is available with ``--format json``.
 
@@ -86,7 +96,9 @@ Output fields:
 
 Operational caveats:
 
-* the selected Python environment must be able to ``import pod5``;
+* the selected container image must be available locally or pullable by the
+  Docker runtime;
+* the selected container image must be able to ``import pod5``;
 * files that cannot be opened by ``pod5.Reader`` fail before output is emitted;
 * missing files, directories, and non-POD5 files fail before output is emitted.
 
@@ -157,8 +169,8 @@ Usage:
    cargo run -- folderinfo /path/to/folder --format json
 
 Current behavior recursively finds ``.pod5`` files, aggregates the current
-``fileinfo`` fields through the same official Python ``pod5`` backend, and runs
-the implemented ``verify`` checks for each file.
+``fileinfo`` fields through the same Dockerized ``pod5`` backend, and runs the
+implemented ``verify`` checks for each file.
 
 TSV is emitted by default. JSON is available with ``--format json``.
 
@@ -181,7 +193,9 @@ Operational caveats:
 
 * duplicate file-name detection and fast verification failure detection are
   active now;
-* the selected Python environment must be able to ``import pod5``;
+* the selected container image must be available locally or pullable by the
+  Docker runtime;
+* the selected container image must be able to ``import pod5``;
 * folder summaries fail individual files that cannot be opened by
   ``pod5.Reader``.
 

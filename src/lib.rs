@@ -717,7 +717,10 @@ impl fmt::Display for Pod5ReaderError {
 
 impl std::error::Error for Pod5ReaderError {}
 
-const POD5_METADATA_PYTHON: &str = r#"
+/// Default container image used for POD5 parser subprocesses.
+pub const DEFAULT_POD5_BACKEND_IMAGE: &str = "pod5-tools-pod5:0.1.0";
+
+const POD5_CONTAINER_METADATA_PYTHON: &str = r#"
 import datetime
 import json
 import math
@@ -759,7 +762,7 @@ def fail(category, message):
 try:
     import pod5
 except Exception as exc:
-    fail("backend", f"failed to import official pod5 Python package: {exc}")
+    fail("backend", f"failed to import official pod5 Python package inside container: {exc}")
 
 
 path = sys.argv[-1]
@@ -833,40 +836,51 @@ struct OfficialPod5BackendOutput {
     error: Option<String>,
 }
 
-/// POD5 metadata reader backed by Oxford Nanopore's official Python package.
+/// POD5 metadata reader backed by a Dockerized official POD5 parser.
 ///
-/// The adapter invokes ``python -c`` with a small read-only helper that imports
-/// ``pod5.Reader``. The executable is selected from ``POD5_TOOLS_PYTHON`` when
-/// set, otherwise ``python3`` is used. The selected Python environment must
-/// have the official ``pod5`` package installed.
+/// The adapter invokes ``docker run --rm`` with the POD5 file's parent
+/// directory mounted read-only at ``/pod5-input``. The container runs a small
+/// read-only helper that imports Oxford Nanopore's ``pod5.Reader``. The Docker
+/// executable is selected from ``POD5_TOOLS_DOCKER`` when set, otherwise
+/// ``docker`` is used. The image is selected from ``POD5_TOOLS_POD5_IMAGE``
+/// when set, otherwise `DEFAULT_POD5_BACKEND_IMAGE` is used.
 #[derive(Clone, Debug, Default)]
-pub struct OfficialPod5MetadataReader {
-    python: Option<PathBuf>,
+pub struct DockerPod5MetadataReader {
+    docker: Option<PathBuf>,
+    image: Option<String>,
 }
 
-impl OfficialPod5MetadataReader {
-    /// Create a reader that uses ``POD5_TOOLS_PYTHON`` or ``python3``.
+impl DockerPod5MetadataReader {
+    /// Create a reader that uses ``POD5_TOOLS_DOCKER`` and ``POD5_TOOLS_POD5_IMAGE``.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Create a reader with an explicit Python executable path.
-    pub fn with_python(python: impl Into<PathBuf>) -> Self {
+    /// Create a reader with an explicit Docker executable and container image.
+    pub fn with_docker(docker: impl Into<PathBuf>, image: impl Into<String>) -> Self {
         Self {
-            python: Some(python.into()),
+            docker: Some(docker.into()),
+            image: Some(image.into()),
         }
     }
 
-    fn python_executable(&self) -> PathBuf {
-        self.python.clone().unwrap_or_else(|| {
-            std::env::var_os("POD5_TOOLS_PYTHON")
+    fn docker_executable(&self) -> PathBuf {
+        self.docker.clone().unwrap_or_else(|| {
+            std::env::var_os("POD5_TOOLS_DOCKER")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("python3"))
+                .unwrap_or_else(|| PathBuf::from("docker"))
+        })
+    }
+
+    fn image(&self) -> String {
+        self.image.clone().unwrap_or_else(|| {
+            std::env::var("POD5_TOOLS_POD5_IMAGE")
+                .unwrap_or_else(|_| DEFAULT_POD5_BACKEND_IMAGE.to_string())
         })
     }
 }
 
-impl Pod5MetadataReader for OfficialPod5MetadataReader {
+impl Pod5MetadataReader for DockerPod5MetadataReader {
     fn read_file_info(&self, path: &Path) -> Pod5ReaderResult<Pod5FileInfo> {
         let metadata = fs::metadata(path).map_err(|error| Pod5ReaderError::Path {
             path: path.to_path_buf(),
@@ -885,18 +899,44 @@ impl Pod5MetadataReader for OfficialPod5MetadataReader {
             });
         }
 
-        let python = self.python_executable();
-        let output = ProcessCommand::new(&python)
+        let canonical_path = fs::canonicalize(path).map_err(|error| Pod5ReaderError::Path {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+        let mount_path = canonical_path
+            .parent()
+            .ok_or_else(|| Pod5ReaderError::Path {
+                path: path.to_path_buf(),
+                reason: "failed to identify parent directory for Docker mount".to_string(),
+            })?;
+        let file_name = canonical_path
+            .file_name()
+            .ok_or_else(|| Pod5ReaderError::Path {
+                path: path.to_path_buf(),
+                reason: "failed to identify file name for Docker mount".to_string(),
+            })?;
+        let container_path = Path::new("/pod5-input").join(file_name);
+        let docker = self.docker_executable();
+        let image = self.image();
+        let output = ProcessCommand::new(&docker)
+            .arg("run")
+            .arg("--rm")
+            .arg("--network")
+            .arg("none")
+            .arg("--volume")
+            .arg(format!("{}:/pod5-input:ro", mount_path.display()))
+            .arg(&image)
+            .arg("python")
             .arg("-c")
-            .arg(POD5_METADATA_PYTHON)
+            .arg(POD5_CONTAINER_METADATA_PYTHON)
             .arg("--")
-            .arg(path)
+            .arg(&container_path)
             .output()
             .map_err(|error| Pod5ReaderError::Path {
                 path: path.to_path_buf(),
                 reason: format!(
-                    "failed to run POD5 Python backend {}: {error}",
-                    python.display()
+                    "failed to run POD5 Docker backend {} with image {image}: {error}",
+                    docker.display()
                 ),
             })?;
 
@@ -907,7 +947,7 @@ impl Pod5MetadataReader for OfficialPod5MetadataReader {
                 Pod5ReaderError::Schema {
                     path: path.to_path_buf(),
                     reason: format!(
-                        "failed to parse POD5 Python backend output: {error}; stderr: {stderr}"
+                        "failed to parse POD5 Docker backend output: {error}; stderr: {stderr}"
                     ),
                 }
             })?;
@@ -915,7 +955,7 @@ impl Pod5MetadataReader for OfficialPod5MetadataReader {
         if !output.status.success() {
             let reason = parsed.error.unwrap_or_else(|| {
                 if stderr.is_empty() {
-                    "POD5 Python backend failed without a diagnostic".to_string()
+                    "POD5 Docker backend failed without a diagnostic".to_string()
                 } else {
                     stderr
                 }
@@ -962,7 +1002,7 @@ impl Pod5MetadataReader for OfficialPod5MetadataReader {
 ///
 /// This reader validates that an input is a `.pod5` file and reports file size
 /// without parsing POD5 internals. It is intended for tests and explicit
-/// fallback use; the command-line defaults use `OfficialPod5MetadataReader`.
+/// fallback use; the command-line defaults use `DockerPod5MetadataReader`.
 #[derive(Debug, Default)]
 pub struct FilesystemPod5MetadataReader;
 
@@ -1055,7 +1095,7 @@ pub fn run(cli: Cli) -> Result<String, Pod5ToolsError> {
     match cli.command {
         Command::Find { path, format } => run_find(path, format),
         Command::Fileinfo { path, format } => {
-            run_fileinfo(&OfficialPod5MetadataReader::new(), &path, format)
+            run_fileinfo(&DockerPod5MetadataReader::new(), &path, format)
         }
         Command::Verify { path, format } => run_verify(&path, format),
         Command::Folderinfo { path, format } => run_folderinfo(&path, format),
@@ -1244,7 +1284,7 @@ fn run_verify(path: &Path, format: OutputFormat) -> Result<String, Pod5ToolsErro
 }
 
 fn run_folderinfo(path: &Path, format: OutputFormat) -> Result<String, Pod5ToolsError> {
-    let info = folder_info(path, &OfficialPod5MetadataReader::new())?;
+    let info = folder_info(path, &DockerPod5MetadataReader::new())?;
     match format {
         OutputFormat::Tsv => Ok(format_folder_info_tsv(&info)),
         OutputFormat::Json => serde_json::to_string_pretty(&info)
@@ -3072,11 +3112,11 @@ mod tests {
     fn run_fileinfo_emits_tsv_by_default() {
         let root = tempfile::tempdir().unwrap();
         let pod5 = root.path().join("reads.pod5");
-        let backend = root.path().join("fake-pod5-backend");
+        let backend = root.path().join("fake-docker");
         fs::write(&pod5, b"pod5").unwrap();
-        write_fake_pod5_backend(&backend);
+        write_fake_docker_backend(&backend);
 
-        let reader = OfficialPod5MetadataReader::with_python(&backend);
+        let reader = DockerPod5MetadataReader::with_docker(&backend, "pod5-tools-test:latest");
         let output = run_fileinfo(&reader, &pod5, OutputFormat::Tsv).unwrap();
 
         assert!(output.starts_with("path\tsize_bytes\tflow_cell_id"));
@@ -3088,11 +3128,11 @@ mod tests {
     fn run_fileinfo_emits_json_when_requested() {
         let root = tempfile::tempdir().unwrap();
         let pod5 = root.path().join("reads.pod5");
-        let backend = root.path().join("fake-pod5-backend");
+        let backend = root.path().join("fake-docker");
         fs::write(&pod5, b"pod5").unwrap();
-        write_fake_pod5_backend(&backend);
+        write_fake_docker_backend(&backend);
 
-        let reader = OfficialPod5MetadataReader::with_python(&backend);
+        let reader = DockerPod5MetadataReader::with_docker(&backend, "pod5-tools-test:latest");
         let output = run_fileinfo(&reader, &pod5, OutputFormat::Json).unwrap();
 
         assert!(output.contains("\"size_bytes\": 4"));
@@ -3110,7 +3150,7 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
-    fn write_fake_pod5_backend(path: &Path) {
+    fn write_fake_docker_backend(path: &Path) {
         fs::write(
             path,
             r#"#!/bin/sh
@@ -3126,14 +3166,14 @@ JSON
     }
 
     #[test]
-    fn official_fileinfo_reads_metadata_from_backend() {
+    fn docker_fileinfo_reads_metadata_from_backend() {
         let root = tempfile::tempdir().unwrap();
         let pod5 = root.path().join("reads.pod5");
-        let backend = root.path().join("fake-pod5-backend");
+        let backend = root.path().join("fake-docker");
         fs::write(&pod5, b"pod5").unwrap();
-        write_fake_pod5_backend(&backend);
+        write_fake_docker_backend(&backend);
 
-        let reader = OfficialPod5MetadataReader::with_python(&backend);
+        let reader = DockerPod5MetadataReader::with_docker(&backend, "pod5-tools-test:latest");
         let info = read_pod5_file_info(&reader, &pod5).unwrap();
 
         assert_eq!(info.flow_cell_id.as_deref(), Some("FLO-MIN114"));
@@ -3387,13 +3427,13 @@ JSON
     #[test]
     fn run_folderinfo_emits_tsv_by_default() {
         let root = tempfile::tempdir().unwrap();
-        let backend = root.path().join("fake-pod5-backend");
+        let backend = root.path().join("fake-docker");
         write_signature_fixture(&root.path().join("reads.pod5"));
-        write_fake_pod5_backend(&backend);
+        write_fake_docker_backend(&backend);
 
         let info = folder_info(
             root.path(),
-            &OfficialPod5MetadataReader::with_python(&backend),
+            &DockerPod5MetadataReader::with_docker(&backend, "pod5-tools-test:latest"),
         )
         .unwrap();
         let output = format_folder_info_tsv(&info);
@@ -3406,13 +3446,13 @@ JSON
     #[test]
     fn run_folderinfo_emits_json_when_requested() {
         let root = tempfile::tempdir().unwrap();
-        let backend = root.path().join("fake-pod5-backend");
+        let backend = root.path().join("fake-docker");
         write_signature_fixture(&root.path().join("reads.pod5"));
-        write_fake_pod5_backend(&backend);
+        write_fake_docker_backend(&backend);
 
         let info = folder_info(
             root.path(),
-            &OfficialPod5MetadataReader::with_python(&backend),
+            &DockerPod5MetadataReader::with_docker(&backend, "pod5-tools-test:latest"),
         )
         .unwrap();
         let output = serde_json::to_string_pretty(&info).unwrap();

@@ -51,14 +51,19 @@ pod5-tools playback plan --manifest playback_manifest.json --sample sample-a
 pod5-tools playback emit --manifest playback_manifest.json --sample sample-a --speedup 5x
 ```
 
-`fileinfo` and `folderinfo` use Oxford Nanopore's official Python `pod5`
-reader to parse file internals. Install the package in the active Python
-environment, or point `pod5-tools` at the intended interpreter:
+`fileinfo` and `folderinfo` parse POD5 internals only through a Dockerized
+backend image that contains Oxford Nanopore's official Python `pod5` package.
+Build the default backend image before running metadata commands:
 
 ```text
-pip install pod5
-POD5_TOOLS_PYTHON=/path/to/python pod5-tools fileinfo /path/to/file.pod5
+docker build -t pod5-tools-pod5:0.1.0 docker/pod5-backend
+pod5-tools fileinfo /path/to/file.pod5
 ```
+
+The native Rust binary invokes `docker run --rm --network none`, mounts the
+source POD5 file's parent directory read-only, and reads metadata inside the
+container. Use `POD5_TOOLS_DOCKER` to select a Docker-compatible runtime and
+`POD5_TOOLS_POD5_IMAGE` to select a different backend image.
 
 Command groups:
 

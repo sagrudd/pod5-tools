@@ -67,6 +67,9 @@ Deliverables:
 - `folderinfo` aggregates `fileinfo` results across one folder and identifies
   mixed metadata, acquisition windows, byte totals, and suspicious gaps.
 - Integration tests with small fixtures or mocked reader traits.
+- Dockerized official POD5 parser image used as the supported metadata backend
+  for `fileinfo` and `folderinfo`, avoiding host-level Python installation
+  requirements.
 
 Acceptance criteria:
 
@@ -76,6 +79,8 @@ Acceptance criteria:
   integrity failures.
 - `verify` has a fast path for extension/signature failures and a deeper path
   for schema/layout adherence once the concrete reader backend is connected.
+- Host deployments do not require a local Python `pod5` installation; the
+  parser dependency is isolated in the backend container.
 
 ## Milestone 3: Manifests, Comparison, and Subdivision Planning
 
@@ -145,6 +150,30 @@ Acceptance criteria:
 - Write operations never modify source data in place.
 - Output provenance records source files, selection criteria, and tool version.
 - Large-data behavior is benchmarked before release.
+
+## Milestone 6: Rust-Native POD5 Reader Evaluation
+
+Goal: determine whether selected POD5 inspection behavior should be replicated
+directly in Rust after the Dockerized official parser has established reference
+outputs.
+
+Candidate deliverables:
+
+- Fixture corpus with representative POD5 files and expected metadata generated
+  by the Docker backend.
+- Rust-native reader spike for extension, layout, schema, run metadata, read
+  counts, and acquisition timing.
+- Performance and packaging comparison against the Docker backend.
+- Decision record describing whether Rust-native parsing should become a
+  supported backend.
+
+Acceptance criteria:
+
+- Rust-native output matches the Dockerized official backend for all supported
+  fields on the fixture corpus.
+- Schema compatibility risks are documented before changing defaults.
+- Docker remains the production parser backend until explicit approval changes
+  the support contract.
 
 ## Ecosystem Positioning
 

@@ -20,10 +20,10 @@ From the repository root:
    cargo run -- --help
 
 The current implementation includes read-only discovery, fast verification,
-official-POD5-backed metadata summaries, manifests, comparison, subdivision
-planning, whole-file subdivision materialization, and playback schedule
-inspection. Read-level POD5 rewriting still depends on a future concrete writer
-backend.
+Docker-backed official POD5 metadata summaries, manifests, comparison,
+subdivision planning, whole-file subdivision materialization, and playback
+schedule inspection. Read-level POD5 rewriting still depends on a future
+concrete writer backend.
 
 Versioning
 ----------
@@ -48,11 +48,19 @@ a concrete POD5 parser. This keeps ``fileinfo``, ``folderinfo``, manifests, and
 future subdivision planning testable without committing large binary fixtures to
 the repository.
 
-The command-line default is ``OfficialPod5MetadataReader``. It invokes Oxford
-Nanopore's official Python ``pod5.Reader`` in a read-only subprocess and selects
-the executable from ``POD5_TOOLS_PYTHON`` or ``python3``. ``fileinfo`` and
-``folderinfo`` therefore require a Python environment where ``import pod5``
-succeeds.
+The command-line default is ``DockerPod5MetadataReader``. It invokes
+``docker run --rm --network none`` with the input file's parent directory
+mounted read-only at ``/pod5-input``. The container image runs Oxford
+Nanopore's official Python ``pod5.Reader`` and returns a small JSON metadata
+record to the Rust command layer.
+
+The Docker executable is selected from ``POD5_TOOLS_DOCKER`` or ``docker``.
+The backend image is selected from ``POD5_TOOLS_POD5_IMAGE`` or
+``pod5-tools-pod5:0.1.0``. Build the default image with:
+
+.. code-block:: sh
+
+   docker build -t pod5-tools-pod5:0.1.0 docker/pod5-backend
 
 Reader adapters return typed errors with separate categories for path, format,
 schema, and integrity failures. Commands should preserve those categories in
@@ -62,11 +70,12 @@ slices.
 Backend Evaluation
 ------------------
 
-The project now uses the official Python ``pod5`` reader for semantic
-compatibility with ONT files and schema changes. A Rust-native Arrow reader can
-still be evaluated later if packaging the Python dependency becomes a deployment
-problem, but it must match the official implementation before it can replace the
-default backend.
+The project now uses a Dockerized official Python ``pod5`` reader for semantic
+compatibility with ONT files and schema changes while avoiding host-level Python
+environment coupling. Replicating the Python module directly in Rust is a
+future optimization, not the current production path. A Rust-native Arrow/POD5
+reader must be validated against the container backend on realistic fixtures
+before it can replace the default parser.
 
 Local Documentation Build
 -------------------------

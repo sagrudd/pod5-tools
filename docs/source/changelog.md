@@ -10,7 +10,7 @@ Initial development release candidate.
 - `find`, `verify`, `fileinfo`, `folderinfo`, `manifest`, `compare`,
   `subdivide plan`, `subdivide write`, `playback plan`, and `playback emit`
   command surfaces.
-- Official Python `pod5.Reader` backend for `fileinfo` and `folderinfo`
+- Dockerized official `pod5.Reader` backend for `fileinfo` and `folderinfo`
   metadata, including flow cell ID, sequencing kit, read count, acquisition
   start time, duration, file version, and parser integrity status.
 - Versioned manifest, subdivision, playback, and provenance output contracts.
@@ -21,8 +21,8 @@ Initial development release candidate.
 
 - Deep POD5 integrity checks beyond the fixed signatures are reserved but not
   implemented.
-- `fileinfo` and `folderinfo` require a Python environment where Oxford
-  Nanopore's `pod5` package can be imported.
+- `fileinfo` and `folderinfo` require a Docker-compatible runtime and a backend
+  image containing Oxford Nanopore's `pod5` package.
 - `subdivide write` currently copies whole POD5 files rather than rewriting
   read-level or elapsed-time subsets.
 - No release tag has been created; tagging requires explicit release approval.

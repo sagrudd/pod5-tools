@@ -46,7 +46,8 @@ Use semantic versioning:
 - Minor versions for new commands, new library APIs, new output contracts, or
   backwards-compatible behavior that materially changes how operators use the
   tool.
-- Major versions only after explicit discussion and approval.
+- Major versions only after explicit discussion and approval from a human
+  reviewer or the project owner.
 
 Until the first release, use `0.y.z` versions and treat public contracts as
 stabilizing but still subject to documented change.
